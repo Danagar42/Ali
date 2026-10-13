@@ -1,0 +1,38 @@
+name: AliExpress Daily Farm
+
+on:
+  schedule:
+    # Запуск щодня о 08:00 UTC (11:00 за Києвом влітку / 10:00 взимку)
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    # Можливість запустити вручну з вкладки Actions у GitHub
+
+jobs:
+  farm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run AliExpress Farmer
+        env:
+          # Основний або перший акаунт
+          ALI_COOKIES: ${{ secrets.ALI_COOKIES }}
+          # Додаткові акаунти (можна додавати скільки завгодно)
+          ALI_COOKIES_1: ${{ secrets.ALI_COOKIES_1 }}
+          ALI_COOKIES_2: ${{ secrets.ALI_COOKIES_2 }}
+          ALI_COOKIES_3: ${{ secrets.ALI_COOKIES_3 }}
+        run: |
+          python -m src.main
