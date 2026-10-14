@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     # Можливість запустити вручну з вкладки Actions у GitHub
 
+permissions:
+  contents: read
+
 jobs:
   farm:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -30,11 +34,25 @@ jobs:
         env:
           # Пропускаємо довгу паузу при ручному запуску через кнопку
           SKIP_RANDOM_SLEEP: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          # Гнучка передача необмеженої кількості акаунтів через єдиний JSON-секрет
+          ALI_COOKIES_JSON: ${{ secrets.ALI_COOKIES_JSON }}
           # Основний або перший акаунт
           ALI_COOKIES: ${{ secrets.ALI_COOKIES }}
-          # Додаткові акаунти (можна додавати скільки завгодно)
+          # Додаткові акаунти (до 10 акаунтів із окремими секретами)
           ALI_COOKIES_1: ${{ secrets.ALI_COOKIES_1 }}
           ALI_COOKIES_2: ${{ secrets.ALI_COOKIES_2 }}
           ALI_COOKIES_3: ${{ secrets.ALI_COOKIES_3 }}
+          ALI_COOKIES_4: ${{ secrets.ALI_COOKIES_4 }}
+          ALI_COOKIES_5: ${{ secrets.ALI_COOKIES_5 }}
+          ALI_COOKIES_6: ${{ secrets.ALI_COOKIES_6 }}
+          ALI_COOKIES_7: ${{ secrets.ALI_COOKIES_7 }}
+          ALI_COOKIES_8: ${{ secrets.ALI_COOKIES_8 }}
+          ALI_COOKIES_9: ${{ secrets.ALI_COOKIES_9 }}
+          ALI_COOKIES_10: ${{ secrets.ALI_COOKIES_10 }}
+          # Підтримка проксі (опційно)
+          ALI_PROXY: ${{ secrets.ALI_PROXY }}
+          # Сповіщення в Telegram (опційно)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -m src.main

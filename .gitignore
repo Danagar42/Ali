@@ -6,6 +6,16 @@ venv/
 ENV/
 env/
 .env
+.env.*
+.env*.local
 *.log
 .idea/
 .vscode/
+cookies.txt
+*.cookies
+.DS_Store
+Thumbs.db
+desktop.ini
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
