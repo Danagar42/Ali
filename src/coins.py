@@ -13,14 +13,25 @@ BROWSE_TARGETS = [
     "https://www.aliexpress.com/category/44/consumer-electronics.html",
     "https://www.aliexpress.com/category/7/computer-office.html",
     "https://www.aliexpress.com/category/1509/jewelry-accessories.html",
-    "https://coins.aliexpress.com/",
+    "https://www.aliexpress.com/p/coin-pc-index/index.html",
 ]
 
 def _is_task_already_done(data: Any) -> bool:
     if not data:
         return False
+    if isinstance(data, dict):
+        if data.get("success") is False:
+            return False
+        if data.get("hasHandle") is False:
+            return False
+        err_msg = str(data.get("errorMessage", "") or data.get("msg", "")).lower()
+        if any(f in err_msg for f in ["can't fund", "cannot find", "not found", "not exist", "no such", "error"]):
+            return False
     text = str(data).lower()
-    return any(w in text for w in ["already", "limit", "finish", "repeat", "has finished", "already_done"])
+    return any(w in text for w in [
+        "already_done", "task_finished", "has finished", "already completed",
+        "exceed_limit", "max_limit", "already_completed", "finish_limit"
+    ])
 
 
 def _is_task_success(data: Any) -> bool:
@@ -56,27 +67,44 @@ class CoinsFarmManager:
     def __init__(self, client: AliClient):
         self.client = client
         self.account_name = client.account_name
+        self._dead_urls = set()
 
     def fetch_active_tasks(self) -> List[Dict[str, Any]]:
         """
         Запитує список доступних завдань росту користувача.
         """
-        query_url = "https://www.aliexpress.com/fn/user-grow-task/queryTask"
-        try:
-            resp = self.client.get(query_url, params={"channel": "COIN"})
-            if resp and resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, dict):
-                    task_list = (
-                        data.get("data", {}).get("taskList")
-                        or data.get("result", {}).get("taskList")
-                        or []
-                    )
-                    if isinstance(task_list, list) and task_list:
-                        logger.info(f"[{self.account_name}] Знайдено активних завдань: {len(task_list)}")
-                        return task_list
-        except Exception as e:
-            logger.debug(f"[{self.account_name}] Не вдалося отримати список завдань: {e}")
+        task_query_urls = [
+            "https://coins.aliexpress.com/api/tasks",
+            "https://coins.aliexpress.com/api/task/list"
+        ]
+        for query_url in task_query_urls:
+            if query_url in self._dead_urls:
+                continue
+            try:
+                resp = self.client.get(query_url, params={"channel": "COIN"})
+                if not resp or resp.status_code != 200:
+                    if resp and resp.status_code in (404, 500, 502, 503):
+                        self._dead_urls.add(query_url)
+                    continue
+                content_type = resp.headers.get("content-type", "").lower()
+                if "json" not in content_type:
+                    self._dead_urls.add(query_url)
+                    continue
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        task_list = (
+                            data.get("data", {}).get("taskList")
+                            or data.get("result", {}).get("taskList")
+                            or []
+                        )
+                        if isinstance(task_list, list) and task_list:
+                            logger.info(f"[{self.account_name}] Знайдено активних завдань: {len(task_list)}")
+                            return task_list
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.debug(f"[{self.account_name}] Не вдалося отримати список завдань: {e}")
         return []
 
     def farm_browse_tasks(self, count: int = 4) -> int:
@@ -97,19 +125,24 @@ class CoinsFarmManager:
         for idx, url in enumerate(targets, 1):
             logger.info(f"[{self.account_name}] [{idx}/{len(targets)}] Перегляд: {url}")
             resp = self.client.get(url)
+            page_ok = False
             if resp and resp.status_code == 200:
                 logger.debug(f"[{self.account_name}] Сторінку успішно відвідано.")
+                page_ok = True
             else:
                 status = resp.status_code if resp else "Error"
                 logger.warning(f"[{self.account_name}] Не вдалося завантажити {url} (статус: {status})")
 
             # Визначаємо taskId, якщо такий є зі списку завдань
             current_task_id = browse_task_ids.pop(0) if browse_task_ids else f"BROWSE_{idx}"
-            if self._report_task_complete(
+            reported = self._report_task_complete(
                 task_type="BROWSE_ITEM",
                 task_id=current_task_id,
                 scene_id="browse_channel_coin"
-            ):
+            )
+            if reported:
+                completed_or_acknowledged += 1
+            elif page_ok:
                 completed_or_acknowledged += 1
 
         return completed_or_acknowledged
@@ -124,8 +157,8 @@ class CoinsFarmManager:
         Відправляє подію виконання завдання на бекенд AliExpress із детальним логуванням відповіді.
         """
         report_urls = [
-            "https://www.aliexpress.com/fn/user-grow-task/finishTask",
-            "https://coins.aliexpress.com/api/finishTask"
+            "https://coins.aliexpress.com/api/finishTask",
+            "https://coins.aliexpress.com/api/task/finish"
         ]
 
         payload: Dict[str, Any] = {
@@ -138,14 +171,28 @@ class CoinsFarmManager:
             payload["sceneId"] = scene_id
 
         for url in report_urls:
+            if url in self._dead_urls:
+                continue
             try:
                 resp = self.client.post(url, json=payload)
                 if not resp or resp.status_code != 200:
+                    if resp and resp.status_code in (404, 500, 502, 503):
+                        self._dead_urls.add(url)
+                    continue
+
+                content_type = resp.headers.get("content-type", "").lower()
+                if "json" not in content_type:
+                    self._dead_urls.add(url)
                     continue
 
                 try:
                     data = resp.json()
-                    ret_str = str(data.get("ret", [])) if isinstance(data, dict) else ""
+                    if not isinstance(data, dict):
+                        continue
+                    if data.get("hasHandle") is False or "can't fund" in str(data.get("errorMessage", "")).lower():
+                        continue
+
+                    ret_str = str(data.get("ret", []))
                     if _is_task_already_done(data):
                         logger.info(f"[{self.account_name}] ℹ️ Завдання '{task_type}' вже виконано або вичерпано ліміт.")
                         return True
@@ -153,9 +200,8 @@ class CoinsFarmManager:
                         logger.info(f"[{self.account_name}] ✅ Завдання '{task_type}' зараховано!")
                         return True
                     else:
-                        msg = data.get("msg") or data.get("message") or ret_str if isinstance(data, dict) else str(data)
-                        logger.info(f"[{self.account_name}] ℹ️ Статус завдання '{task_type}': {msg}")
-                        return False
+                        msg = data.get("msg") or data.get("message") or ret_str
+                        logger.debug(f"[{self.account_name}] ℹ️ Статус завдання '{task_type}': {msg}")
                 except Exception:
                     logger.debug(f"[{self.account_name}] Відповідь finishTask не JSON: {resp.text[:120]}")
             except Exception as e:

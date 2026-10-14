@@ -5,13 +5,21 @@ from src.client import AliClient
 
 logger = logging.getLogger(__name__)
 
-COUPON_CENTER_URL = "https://sale.aliexpress.com/country@UA/coupon_center.htm"
+COUPON_CENTER_URL = "https://www.aliexpress.com/coupon-center.html"
+COUPON_CENTER_BACKUP_URL = "https://campaign.aliexpress.com/wow/gcp/ae/channel/ae/coupon-center/index"
 
 def _is_coupon_already_claimed(data: Any) -> bool:
     if not data:
         return False
+    if isinstance(data, dict):
+        err_msg = str(data.get("errorMessage", "") or data.get("msg", "") or data.get("message", "")).lower()
+        if any(f in err_msg for f in ["rate limit", "time limit", "expired", "failed", "error", "invalid"]):
+            return False
     text = str(data).lower()
-    return any(w in text for w in ["already", "has claimed", "claimed", "limit", "already_claim"])
+    return any(w in text for w in [
+        "already_claimed", "has claimed", "already claimed", "already_claim",
+        "coupon_claimed", "have claimed", "has_claimed"
+    ])
 
 
 def _is_coupon_success(data: Any) -> bool:
@@ -47,6 +55,7 @@ class CouponCollector:
     def __init__(self, client: AliClient):
         self.client = client
         self.account_name = client.account_name
+        self._dead_endpoints = set()
 
     def _extract_coupon_candidates(self, html_content: str) -> List[Dict[str, str]]:
         """
@@ -74,6 +83,10 @@ class CouponCollector:
         """
         logger.info(f"[{self.account_name}] 🎟️ Перевірка доступних купонів у Coupon Center...")
         resp = self.client.get(COUPON_CENTER_URL)
+        if not resp or resp.status_code != 200:
+            logger.debug(f"[{self.account_name}] Перехід на резервний Coupon Center...")
+            resp = self.client.get(COUPON_CENTER_BACKUP_URL)
+
         candidates: List[Dict[str, str]] = []
 
         if resp and resp.status_code == 200:
@@ -110,9 +123,18 @@ class CouponCollector:
                 payload["couponId"] = item["couponId"]
 
             for url in claim_endpoints:
+                if url in self._dead_endpoints:
+                    continue
                 try:
                     res = self.client.post(url, json=payload)
                     if not res or res.status_code != 200:
+                        if res and res.status_code in (404, 500, 502, 503):
+                            self._dead_endpoints.add(url)
+                        continue
+
+                    content_type = res.headers.get("content-type", "").lower()
+                    if "json" not in content_type:
+                        self._dead_endpoints.add(url)
                         continue
 
                     try:

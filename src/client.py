@@ -41,7 +41,8 @@ class AliClient:
     ):
         self.account_name = account_name
         self.session = requests.Session()
-        self.session.cookies.update(cookies)
+        for k, v in cookies.items():
+            self.session.cookies.set(k, v, domain=".aliexpress.com", path="/")
 
         # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або глобальної ALI_PROXY
         resolved_proxy = proxy or os.getenv(f"ALI_PROXY_{account_name}") or os.getenv("ALI_PROXY")
@@ -59,7 +60,29 @@ class AliClient:
             self.user_agent, profile_hints = get_random_browser_profile()
             self.client_hints = client_hints if client_hints is not None else profile_hints
 
+        self._ensure_region_kr()
         self._init_headers()
+
+    def _ensure_region_kr(self):
+        """
+        Забезпечує наявність субпараметра region=KR у cookie aep_usuc_f.
+        Необхідно для обходу регіонального блокування чекіну в JS-бандлах AliExpress.
+        """
+        aep_val = self.get_cookie("aep_usuc_f")
+        if aep_val:
+            if "region=" in aep_val:
+                new_aep = re.sub(r"region=[a-zA-Z0-9_-]+", "region=KR", aep_val)
+            else:
+                new_aep = f"{aep_val}&region=KR"
+        else:
+            new_aep = "region=KR&b_locale=en_KR&c_tp=USD"
+
+        # Очищуємо попередні екземпляри cookie щоб уникнути дублікатів та конфліктів у RequestsCookieJar
+        for c in list(self.session.cookies):
+            if c.name == "aep_usuc_f":
+                self.session.cookies.clear(c.domain, c.path, c.name)
+
+        self.session.cookies.set("aep_usuc_f", new_aep, domain=".aliexpress.com", path="/")
 
     def _init_headers(self):
         headers = {
@@ -78,8 +101,19 @@ class AliClient:
         self.session.headers.update(headers)
 
     def get_cookie(self, name: str) -> Optional[str]:
-        """Отримує значення cookie за ім'ям із поточної сесії."""
-        return self.session.cookies.get(name)
+        """Отримує актуальне значення cookie за ім'ям із поточної сесії."""
+        matching = [c for c in self.session.cookies if c.name == name]
+        if not matching:
+            try:
+                return self.session.cookies.get(name)
+            except Exception:
+                return self.session.cookies.get_dict().get(name)
+
+        # Пріоритет домену .aliexpress.com або найновішому значенню
+        for c in reversed(matching):
+            if c.domain and "aliexpress.com" in c.domain:
+                return c.value
+        return matching[-1].value
 
     def sleep_random(self, min_s: float = REQUEST_DELAY_MIN, max_s: float = REQUEST_DELAY_MAX):
         """Рандомна затримка між запитами для імітації людини."""

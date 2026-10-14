@@ -115,5 +115,13 @@ _default_max_sleep = "180" if IS_CI else "1800"
 MAX_START_SLEEP_SECONDS = int(os.getenv("MAX_START_SLEEP_SECONDS", _default_max_sleep))
 
 # Базові налаштування AliExpress
-ALIEXPRESS_COIN_PAGE = "https://coins.aliexpress.com/"
+ALIEXPRESS_COIN_PAGE = "https://www.aliexpress.com/p/coin-pc-index/index.html"
+ALIEXPRESS_COIN_PAGE_LEGACY = "https://coins.aliexpress.com/"
 DEFAULT_REFERER = "https://www.aliexpress.com/"
+COIN_PC_REFERER = "https://www.aliexpress.com/p/coin-pc-index/index.html"
+ORIGIN = "https://www.aliexpress.com"
+
+# MTOP константи
+MTOP_APP_KEY = "12574478"
+MTOP_JSV = "2.7.5"
+ASAC_CAMPAIGN = "2E227052O27XFLCLMIUIOA"

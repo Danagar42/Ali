@@ -275,7 +275,9 @@ class TestMainErrorHandling(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["appKey"], "12574478")
         self.assertEqual(len(params["sign"]), 32)
-        self.assertEqual(params["api"], "mtop.aliexpress.growth.coins.checkin")
+        self.assertEqual(params["api"], "mtop.aliexpress.coin.pc.sign.list")
+        self.assertEqual(params["jsv"], "2.7.5")
+        self.assertEqual(params["asac"], "2E227052O27XFLCLMIUIOA")
 
         client_without_token = AliClient(cookies={"other_cookie": "val"})
         mgr_no_token = CheckinManager(client_without_token)
@@ -509,6 +511,291 @@ class TestNotificationsAndStability(unittest.TestCase):
         self.assertEqual(mgr.streak_days, 12)
         self.assertEqual(mgr.coins_earned, 25)
         self.assertEqual(mgr.total_coins, 4500)
+
+
+class TestModernCheckinAndRegionalCompatibility(unittest.TestCase):
+    def test_client_regional_compatibility_kr(self):
+        # 1. Existing cookie with region=UA replaced with region=KR
+        client_ua = AliClient(cookies={"aep_usuc_f": "site=glo&region=UA&b_locale=uk_UA"})
+        self.assertIn("region=KR", client_ua.get_cookie("aep_usuc_f"))
+        self.assertNotIn("region=UA", client_ua.get_cookie("aep_usuc_f"))
+
+        # 2. Existing cookie without region gets region=KR appended
+        client_no_region = AliClient(cookies={"aep_usuc_f": "site=glo&c_tp=USD"})
+        self.assertIn("region=KR", client_no_region.get_cookie("aep_usuc_f"))
+
+        # 3. No aep_usuc_f cookie initially gets initialized with region=KR
+        client_empty = AliClient(cookies={})
+        self.assertIn("region=KR", client_empty.get_cookie("aep_usuc_f"))
+
+    @patch("src.client.AliClient.sleep_random")
+    def test_checkin_sign_today_true_sets_already_done(self, mock_sleep):
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        mgr = CheckinManager(client)
+
+        sign_list_resp = MagicMock()
+        sign_list_resp.status_code = 200
+        sign_list_resp.json.return_value = {
+            "api": "mtop.aliexpress.coin.pc.sign.list",
+            "ret": ["SUCCESS::接口调用成功"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": True,
+                    "signDays": 7,
+                    "breaked": 0
+                }
+            }
+        }
+
+        exec_resp = MagicMock()
+        exec_resp.status_code = 200
+        exec_resp.json.return_value = {
+            "api": "mtop.aliexpress.coin.execute",
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "success": True,
+                "data": [{"name": "userCoinsNum", "value": "1540"}]
+            }
+        }
+
+        def mock_post(url, *args, **kwargs):
+            if "mtop.aliexpress.coin.pc.sign.list" in url:
+                return sign_list_resp
+            if "mtop.aliexpress.coin.execute" in url:
+                return exec_resp
+            # If mtop.aliexpress.coin.pc.sign is called, fail the test
+            if "mtop.aliexpress.coin.pc.sign" in url:
+                self.fail("mtop.aliexpress.coin.pc.sign should NOT be called when signToday is True!")
+            return MagicMock(status_code=200)
+
+        with patch.object(client, "get", return_value=MagicMock(status_code=200, text="<html></html>")), \
+             patch.object(client, "post", side_effect=mock_post):
+            res = mgr.run_checkin()
+            self.assertTrue(res)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.streak_days, 7)
+            self.assertEqual(mgr.total_coins, 1540)
+
+    @patch("src.client.AliClient.sleep_random")
+    def test_checkin_sign_today_false_executes_pc_sign(self, mock_sleep):
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        mgr = CheckinManager(client)
+
+        sign_list_resp = MagicMock()
+        sign_list_resp.status_code = 200
+        sign_list_resp.json.return_value = {
+            "api": "mtop.aliexpress.coin.pc.sign.list",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 4
+                }
+            }
+        }
+
+        sign_exec_resp = MagicMock()
+        sign_exec_resp.status_code = 200
+        sign_exec_resp.json.return_value = {
+            "api": "mtop.aliexpress.coin.pc.sign",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 5,
+                    "coins": 20
+                }
+            }
+        }
+
+        exec_resp = MagicMock()
+        exec_resp.status_code = 200
+        exec_resp.json.return_value = {
+            "api": "mtop.aliexpress.coin.execute",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": [{"name": "userCoinsNum", "value": "2050"}]
+            }
+        }
+
+        calls = []
+
+        def mock_post(url, *args, **kwargs):
+            if "mtop.aliexpress.coin.pc.sign.list" in url:
+                calls.append("list")
+                return sign_list_resp
+            if "mtop.aliexpress.coin.pc.sign" in url:
+                calls.append("sign")
+                return sign_exec_resp
+            if "mtop.aliexpress.coin.execute" in url:
+                calls.append("execute")
+                return exec_resp
+            return MagicMock(status_code=200)
+
+        with patch.object(client, "get", return_value=MagicMock(status_code=200, text="<html></html>")), \
+             patch.object(client, "post", side_effect=mock_post):
+            res = mgr.run_checkin()
+            self.assertTrue(res)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.streak_days, 5)
+            self.assertEqual(mgr.coins_earned, 20)
+            self.assertEqual(mgr.total_coins, 2050)
+            self.assertEqual(calls, ["list", "sign", "execute"])
+
+    @patch("src.client.AliClient.sleep_random")
+    def test_coin_execute_balance_parsing(self, mock_sleep):
+        client = AliClient(cookies={"_m_h5_tk": "token_123"})
+        mgr = CheckinManager(client)
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "data": {
+                "success": True,
+                "data": [
+                    {"name": "userCoinsNum", "value": "8888"},
+                    {"name": "valueMoney", "value": "88.88"}
+                ]
+            }
+        }
+
+        with patch.object(client, "post", return_value=resp):
+            mgr._fetch_coin_balance()
+            self.assertEqual(mgr.total_coins, 8888)
+
+    @patch("src.client.AliClient.sleep_random")
+    def test_mtop_self_healing_token_expired(self, mock_sleep):
+        client = AliClient(cookies={"_m_h5_tk": "expired_123"})
+        mgr = CheckinManager(client)
+
+        expired_resp = MagicMock()
+        expired_resp.status_code = 200
+        expired_resp.json.return_value = {
+            "ret": ["FAIL_SYS_TOKEN_EXPIRED::Session expired"],
+            "data": {}
+        }
+
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.json.return_value = {
+            "ret": ["SUCCESS::ok"],
+            "data": {"success": True, "data": {"signToday": True, "signDays": 2}}
+        }
+
+        call_count = [0]
+
+        def side_effect(url, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Simulate server returning Set-Cookie on token expired
+                client.session.cookies.set("_m_h5_tk", "fresh_token_99999")
+                return expired_resp
+            return success_resp
+
+        with patch.object(client, "post", side_effect=side_effect):
+            res = mgr._call_mtop("mtop.aliexpress.coin.pc.sign.list")
+            self.assertIsNotNone(res)
+            self.assertEqual(res["ret"], ["SUCCESS::ok"])
+            self.assertEqual(call_count[0], 2)
+
+    def test_is_already_checked_in_prevents_false_positives_on_errors(self):
+        # 1. Flow limit with "repeat later" should NOT be classified as already checked in
+        self.assertFalse(is_already_checked_in({"ret": ["FAIL_SYS_FLOW_LIMIT::Please repeat later"]}))
+        # 2. Token expired message containing "already"
+        self.assertFalse(is_already_checked_in({"ret": ["FAIL_SYS_TOKEN_EXPIRED::Token already expired"]}))
+        # 3. Rate limit
+        self.assertFalse(is_already_checked_in({"ret": ["FAIL_SYS_RATE_LIMIT::Rate limit exceeded"]}))
+
+    def test_is_checkin_success_rejects_business_error_code(self):
+        # MTOP gateway returns SUCCESS, but data has business errorCode or errorMsg
+        biz_err = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {"errorCode": "RISK_REJECT", "errorMsg": "Risk control rejected"}
+        }
+        self.assertFalse(is_checkin_success(biz_err))
+
+        inner_err = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {"data": {"errorCode": "ILLEGAL_ARGUMENT"}}
+        }
+        self.assertFalse(is_checkin_success(inner_err))
+
+        result_err = {
+            "ret": ["SUCCESS::调用成功"],
+            "result": {"errorCode": "ERR_BUSY"}
+        }
+        self.assertFalse(is_checkin_success(result_err))
+
+    def test_client_cookie_domain_deduplication(self):
+        client = AliClient(cookies={"aep_usuc_f": "site=glo&region=UA", "_m_h5_tk": "initial_token"})
+        # Verify single cookie instance with domain .aliexpress.com
+        matching_aep = [c for c in client.session.cookies if c.name == "aep_usuc_f"]
+        self.assertEqual(len(matching_aep), 1)
+        self.assertEqual(matching_aep[0].domain, ".aliexpress.com")
+
+        # Simulate MTOP server returning new _m_h5_tk with .aliexpress.com domain
+        client.session.cookies.set("_m_h5_tk", "fresh_token_123", domain=".aliexpress.com", path="/")
+        matching_tk = [c for c in client.session.cookies if c.name == "_m_h5_tk"]
+        self.assertEqual(len(matching_tk), 1)
+        self.assertEqual(client.get_cookie("_m_h5_tk"), "fresh_token_123")
+
+    def test_balance_parsing_commas_and_floats(self):
+        client = AliClient(cookies={"_m_h5_tk": "token_123"})
+        mgr = CheckinManager(client)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "data": {
+                "success": True,
+                "data": [
+                    {"name": "userCoinsNum", "value": "1,540"},
+                    {"name": "coinCount", "value": "2050.0"}
+                ]
+            }
+        }
+        with patch.object(client, "post", return_value=resp):
+            mgr._fetch_coin_balance()
+            self.assertEqual(mgr.total_coins, 1540)
+
+    def test_sign_list_telemetry_coins_earned_extraction(self):
+        client = AliClient(cookies={})
+        mgr = CheckinManager(client)
+        resp_payload = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 3,
+                    "signList": [
+                        {"days": 1, "coins": 10},
+                        {"days": 2, "coins": 15},
+                        {"days": 3, "coins": 30}
+                    ]
+                }
+            }
+        }
+        mgr._extract_telemetry(resp_payload)
+        self.assertEqual(mgr.streak_days, 3)
+        self.assertEqual(mgr.coins_earned, 30)
+
+    def test_coins_dead_endpoints_not_spammed(self):
+        client = AliClient(cookies={"sid": "test"})
+        manager = CoinsFarmManager(client)
+
+        html_resp = MagicMock()
+        html_resp.status_code = 200
+        html_resp.headers = {"content-type": "text/html;charset=utf-8"}
+        html_resp.text = "<html>Error</html>"
+
+        with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(client, "post", return_value=html_resp) as mock_post:
+            done = manager.farm_browse_tasks(count=3)
+            self.assertEqual(done, 3)
+            # Both report URLs should only be attempted once, then disabled (so max 2 POST calls instead of 6)
+            self.assertLessEqual(mock_post.call_count, 2)
 
 
 if __name__ == "__main__":
