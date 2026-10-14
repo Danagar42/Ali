@@ -1,3 +1,4 @@
+import re
 import time
 import hashlib
 import logging
@@ -23,7 +24,7 @@ def is_already_checked_in(res_data: Any) -> bool:
     indicators = [
         "already", "repeat", "has checked", "have checked",
         "already_checked", "success_repeat_checkin", "repeat_checkin",
-        "haschecked", "ischecked", "checked_in_today"
+        "haschecked", "ischecked", "checked_in_today", "already_signed"
     ]
     return any(ind in text for ind in indicators)
 
@@ -112,6 +113,7 @@ class CheckinManager:
     """
     Керує щоденним чекіном монет AliExpress з підтримкою:
     - MTOP-підпису з автоматичним оновленням (Self-Healing при FAIL_SYS_TOKEN_EXPIRED),
+    - аналізу сторінки монетного центру (виявлення вже виконаного чекіну, стріку, балансу),
     - збору телеметрії стріку та балансу монет,
     - захисту від хибних спрацьовувань.
     """
@@ -125,7 +127,11 @@ class CheckinManager:
         self.total_coins: Optional[int] = None
         self.session_valid = True
 
-    def _prepare_mtop_params(self, api: str = "mtop.aliexpress.growth.coins.checkin") -> Optional[Dict[str, str]]:
+    def _prepare_mtop_params(
+        self,
+        api: str = "mtop.aliexpress.growth.coins.checkin",
+        data: str = '{"channel":"COIN"}'
+    ) -> Optional[Dict[str, str]]:
         """
         Формує параметри MTOP з обов'язковим хеш-підписом sign та актуальним timestamp.
         """
@@ -138,7 +144,6 @@ class CheckinManager:
             return None
         t = str(int(time.time() * 1000))
         app_key = "12574478"
-        data = '{"channel":"COIN"}'
         sign = generate_mtop_sign(token, t, app_key, data)
 
         return {
@@ -152,6 +157,54 @@ class CheckinManager:
             "dataType": "json",
             "data": data
         }
+
+    def _parse_coin_page_html(self, html: str) -> bool:
+        """
+        Аналізує HTML сторінки монет на наявність балансу, стріку та статусу чекіну.
+        Повертає True, якщо зафіксовано, що користувач сьогодні вже зачекінився.
+        """
+        if not html or not isinstance(html, str):
+            return False
+
+        # Витяг днів стріку
+        streak_patterns = [
+            r'["\'](?:continuousDays|signDays|continuousCheckinDays|streakDays|dayNum)["\']\s*:\s*(\d+)',
+            r'data-continuous-days=["\'](\d+)["\']'
+        ]
+        for p in streak_patterns:
+            m = re.search(p, html, re.IGNORECASE)
+            if m:
+                try:
+                    self.streak_days = max(self.streak_days, int(m.group(1)))
+                    break
+                except ValueError:
+                    pass
+
+        # Витяг загального балансу монет
+        balance_patterns = [
+            r'["\'](?:totalCoins|coinBalance|currentCoins|coinsTotal)["\']\s*:\s*(\d+)',
+            r'data-coin-balance=["\'](\d+)["\']'
+        ]
+        for p in balance_patterns:
+            m = re.search(p, html, re.IGNORECASE)
+            if m:
+                try:
+                    self.total_coins = int(m.group(1))
+                    break
+                except ValueError:
+                    pass
+
+        # Перевірка чи чекін уже виконаний
+        already_patterns = [
+            r'["\'](?:isSignInToday|hasSignIn|isSignIn|alreadySign|signInToday|hasChecked)["\']\s*:\s*true',
+            r'["\']signInStatus["\']\s*:\s*(?:1|"1"|"DONE"|"SUCCESS"|"ALREADY")',
+            r'class="[^"]*signed-in[^"]*"'
+        ]
+        for p in already_patterns:
+            if re.search(p, html, re.IGNORECASE):
+                return True
+
+        return False
 
     def _extract_telemetry(self, res_data: Dict[str, Any]):
         """Витягує дані про дні стріку та нагородні монети із відповіді сервера."""
@@ -194,22 +247,57 @@ class CheckinManager:
 
     def run_checkin(self) -> bool:
         """
-        Виконує спробу щоденного чекіну через відомі endpoints AliExpress
+        Виконує спробу щоденного чекіну через актуальні endpoints AliExpress
         з автоматичним retry при оновленні токену MTOP.
         """
         logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну...")
 
-        # 1. Відвідуємо головну сторінку монет для ініціалізації сесії та отримання актуальних cookies
-        coin_home_url = "https://coins.aliexpress.com/"
-        home_resp = self.client.get(coin_home_url)
-        if not home_resp or home_resp.status_code != 200:
-            status = home_resp.status_code if home_resp else "None"
-            logger.warning(f"[{self.account_name}] Сторінка монет повернула статус: {status}")
+        # 1. Відвідуємо головні сторінки монетного центру
+        coin_urls = [
+            "https://www.aliexpress.com/p/coin-index/index.html",
+            "https://coins.aliexpress.com/"
+        ]
+        already_checked_from_html = False
+        for c_url in coin_urls:
+            home_resp = self.client.get(c_url)
+            if home_resp and home_resp.status_code == 200:
+                if self._parse_coin_page_html(home_resp.text):
+                    already_checked_from_html = True
+                    break
+
+        if already_checked_from_html:
+            self.status = "ALREADY_DONE"
+            streak_info = f", Стрік: {self.streak_days} дн." if self.streak_days > 0 else ""
+            balance_info = f", Баланс: {self.total_coins} 🪙" if self.total_coins is not None else ""
+            logger.info(f"[{self.account_name}] ℹ️ З монетного центру виявлено: чекін на сьогодні вже зараховано!{streak_info}{balance_info}")
+            return True
 
         # 2. Формування ендпоінтів для чекіну
-        checkin_endpoints = [
+        checkin_endpoints = []
+
+        # Актуальні MTOP API методи чекіну
+        mtop_apis = [
+            ("mtop.aliexpress.coin.user.signIn", '{"channel":"COIN"}'),
+            ("mtop.aliexpress.growth.coin.sign.signIn", '{"channel":"COIN"}'),
+            ("mtop.aliexpress.user.grow.task.finish", '{"channel":"COIN","taskType":"SIGN"}'),
+        ]
+
+        for api_name, api_data in mtop_apis:
+            mtop_params = self._prepare_mtop_params(api=api_name, data=api_data)
+            if mtop_params:
+                checkin_endpoints.append({
+                    "url": f"https://acs.aliexpress.com/h5/{api_name}/1.0/",
+                    "method": "GET",
+                    "params": mtop_params,
+                    "is_mtop": True,
+                    "api_name": api_name,
+                    "api_data": api_data
+                })
+
+        # Додаткові HTTP POST ендпоінти
+        checkin_endpoints.extend([
             {
-                "url": "https://www.aliexpress.com/fn/user-grow-task/checkin",
+                "url": "https://coins.aliexpress.com/api/sign/signIn",
                 "method": "POST",
                 "json": {"channel": "COIN"}
             },
@@ -218,18 +306,7 @@ class CheckinManager:
                 "method": "POST",
                 "json": {}
             }
-        ]
-
-        mtop_params = self._prepare_mtop_params()
-        if mtop_params:
-            checkin_endpoints.append({
-                "url": "https://acs.aliexpress.com/h5/mtop.aliexpress.growth.coins.checkin/1.0/",
-                "method": "GET",
-                "params": mtop_params,
-                "is_mtop": True
-            })
-        else:
-            logger.debug(f"[{self.account_name}] Cookie _m_h5_tk відсутній, MTOP запит пропущено.")
+        ])
 
         success = False
         for ep in checkin_endpoints:
@@ -254,10 +331,13 @@ class CheckinManager:
                         # Перевірка Self-Healing для MTOP токена
                         if is_mtop and is_mtop_token_expired(res_data) and attempt == 0:
                             logger.info(f"[{self.account_name}] 🔄 Отримано FAIL_SYS_TOKEN_EXPIRED. Оновлюємо MTOP-токен та повторюємо спробу...")
-                            new_params = self._prepare_mtop_params()
+                            new_params = self._prepare_mtop_params(
+                                api=ep.get("api_name", "mtop.aliexpress.coin.user.signIn"),
+                                data=ep.get("api_data", '{"channel":"COIN"}')
+                            )
                             if new_params:
                                 ep["params"] = new_params
-                                continue  # Retry attempt 1
+                                continue
 
                         if is_session_expired(res_data):
                             self.session_valid = False
