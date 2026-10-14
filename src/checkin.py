@@ -130,7 +130,8 @@ class CheckinManager:
     def _prepare_mtop_params(
         self,
         api: str = "mtop.aliexpress.growth.coins.checkin",
-        data: str = '{"channel":"COIN"}'
+        data: str = '{"channel":"COIN"}',
+        app_key: str = "12574478"
     ) -> Optional[Dict[str, str]]:
         """
         Формує параметри MTOP з обов'язковим хеш-підписом sign та актуальним timestamp.
@@ -143,7 +144,6 @@ class CheckinManager:
         if not token:
             return None
         t = str(int(time.time() * 1000))
-        app_key = "12574478"
         sign = generate_mtop_sign(token, t, app_key, data)
 
         return {
@@ -252,9 +252,11 @@ class CheckinManager:
         """
         logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну...")
 
-        # 1. Відвідуємо головні сторінки монетного центру
+        # 1. Відвідуємо сторінки монетного центру (включаючи новий PC Index та Mobile H5)
         coin_urls = [
-            "https://www.aliexpress.com/p/coin-index/index.html",
+            "https://www.aliexpress.com/p/coin-pc-index/index.html",
+            "https://m.aliexpress.com/p/coin-index/index.html",
+            "https://m.aliexpress.com/app/coins.html",
             "https://coins.aliexpress.com/"
         ]
         already_checked_from_html = False
@@ -264,6 +266,9 @@ class CheckinManager:
                 if self._parse_coin_page_html(home_resp.text):
                     already_checked_from_html = True
                     break
+
+        if self.total_coins is not None or self.streak_days > 0:
+            logger.info(f"[{self.account_name}] 📊 Дані з кабінету монет: баланс {self.total_coins or 0} 🪙, стрік {self.streak_days} дн.")
 
         if already_checked_from_html:
             self.status = "ALREADY_DONE"
@@ -275,15 +280,20 @@ class CheckinManager:
         # 2. Формування ендпоінтів для чекіну
         checkin_endpoints = []
 
-        # Актуальні MTOP API методи чекіну
+        # Актуальні MTOP API методи чекіну (H5 та Mobile)
         mtop_apis = [
-            ("mtop.aliexpress.coin.user.signIn", '{"channel":"COIN"}'),
-            ("mtop.aliexpress.growth.coin.sign.signIn", '{"channel":"COIN"}'),
-            ("mtop.aliexpress.user.grow.task.finish", '{"channel":"COIN","taskType":"SIGN"}'),
+            ("mtop.aliexpress.growth.bonus.daily.signin", '{"channel":"COIN"}', "12574478"),
+            ("mtop.aliexpress.growth.coin.sign.in", '{"channel":"COIN"}', "12574478"),
+            ("mtop.aliexpress.growth.user.signin", '{"channel":"COIN"}', "12574478"),
+            ("mtop.aliexpress.growth.coin.signin", '{"channel":"COIN"}', "12574478"),
+            ("mtop.aliexpress.coin.signIn", '{"channel":"COIN"}', "12574478"),
+            ("mtop.aliexpress.user.grow.task.finish", '{"channel":"COIN","taskType":"SIGN"}', "12574478"),
+            ("mtop.aliexpress.growth.bonus.daily.signin", '{"channel":"COIN"}', "21407387"),
+            ("mtop.aliexpress.growth.coin.sign.in", '{"channel":"COIN"}', "21407387"),
         ]
 
-        for api_name, api_data in mtop_apis:
-            mtop_params = self._prepare_mtop_params(api=api_name, data=api_data)
+        for api_name, api_data, app_key in mtop_apis:
+            mtop_params = self._prepare_mtop_params(api=api_name, data=api_data, app_key=app_key)
             if mtop_params:
                 checkin_endpoints.append({
                     "url": f"https://acs.aliexpress.com/h5/{api_name}/1.0/",
@@ -291,7 +301,8 @@ class CheckinManager:
                     "params": mtop_params,
                     "is_mtop": True,
                     "api_name": api_name,
-                    "api_data": api_data
+                    "api_data": api_data,
+                    "app_key": app_key
                 })
 
         # Додаткові HTTP POST ендпоінти
@@ -332,8 +343,9 @@ class CheckinManager:
                         if is_mtop and is_mtop_token_expired(res_data) and attempt == 0:
                             logger.info(f"[{self.account_name}] 🔄 Отримано FAIL_SYS_TOKEN_EXPIRED. Оновлюємо MTOP-токен та повторюємо спробу...")
                             new_params = self._prepare_mtop_params(
-                                api=ep.get("api_name", "mtop.aliexpress.coin.user.signIn"),
-                                data=ep.get("api_data", '{"channel":"COIN"}')
+                                api=ep.get("api_name", "mtop.aliexpress.growth.bonus.daily.signin"),
+                                data=ep.get("api_data", '{"channel":"COIN"}'),
+                                app_key=ep.get("app_key", "12574478")
                             )
                             if new_params:
                                 ep["params"] = new_params
