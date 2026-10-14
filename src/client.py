@@ -3,8 +3,9 @@ import re
 import time
 import random
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import requests
+from src.auth import parse_cookie_string
 from src.config import (
     get_random_browser_profile,
     get_client_hints_for_ua,
@@ -33,7 +34,7 @@ class AliClient:
     """
     def __init__(
         self,
-        cookies: Dict[str, str],
+        cookies: Union[str, Dict[str, str]],
         account_name: str = "Default",
         user_agent: Optional[str] = None,
         client_hints: Optional[Dict[str, str]] = None,
@@ -41,7 +42,8 @@ class AliClient:
     ):
         self.account_name = account_name
         self.session = requests.Session()
-        for k, v in cookies.items():
+        cookie_dict = parse_cookie_string(cookies) if isinstance(cookies, str) else (cookies or {})
+        for k, v in cookie_dict.items():
             self.session.cookies.set(k, v, domain=".aliexpress.com", path="/")
 
         # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або глобальної ALI_PROXY

@@ -248,25 +248,20 @@ class CheckinManager:
         # Якщо токен ще відсутній у сесії, виконуємо probe-запит для отримання _m_h5_tk від шлюзу
         if not self.client.get_cookie("_m_h5_tk"):
             try:
-                probe_params = {
-                    "jsv": MTOP_JSV,
-                    "appKey": MTOP_APP_KEY,
-                    "t": str(int(time.time() * 1000)),
-                    "sign": "probe",
-                    "api": api,
-                    "v": "1.0",
-                    "type": "originaljson",
-                    "dataType": "json",
-                    "asac": ASAC_CAMPAIGN,
-                }
-                self.client.post(url, params=probe_params, data={"data": "{}"}, headers=headers)
+                probe_url = "https://acs.aliexpress.com/h5/mtop.aliexpress.coin.execute/1.0/"
+                self.client.session.get(
+                    probe_url,
+                    params={"api": "mtop.aliexpress.coin.execute", "v": "1.0", "data": "{}"},
+                    headers={"Referer": COIN_PC_REFERER, "Origin": ORIGIN},
+                    timeout=10
+                )
             except Exception as e:
                 logger.debug(f"[{self.account_name}] MTOP probe запит: {e}")
 
         for attempt in range(max_retries):
             params = self._prepare_mtop_params(api=api, data=data)
             if not params:
-                logger.debug(f"[{self.account_name}] Не вдалося сформувати параметри MTOP для {api} (відсутній токен).")
+                logger.warning(f"[{self.account_name}] ⚠️ Не вдалося сформувати підпис MTOP для {api}: у cookies відсутній обов'язковий токен '_m_h5_tk'!")
                 return None
 
             data_str = params.get("data", "{}")
@@ -280,6 +275,9 @@ class CheckinManager:
                     headers=headers
                 )
                 if not resp or resp.status_code != 200:
+                    status = resp.status_code if resp else "None"
+                    body = resp.text[:120] if resp else ""
+                    logger.warning(f"[{self.account_name}] ⚠️ MTOP {api} повернув HTTP {status}: {body}")
                     continue
 
                 res_data = resp.json()
