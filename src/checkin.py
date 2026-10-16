@@ -9,21 +9,25 @@ from src.config import (
     MTOP_APP_KEY,
     MTOP_JSV,
     ASAC_CAMPAIGN,
+    ASAC_MOBILE_CAMPAIGN,
     COIN_PC_REFERER,
     ORIGIN
 )
 
 logger = logging.getLogger(__name__)
 
-# Мобільний канал чекіну монет AliExpress (H5/Mobile App MTOP growth ендпоінти)
+# Мобільний канал чекіну монет AliExpress (Coin Channel MTOP ендпоінти)
 COIN_MOBILE_REFERER = "https://m.aliexpress.com/p/coin-index/index.html"
 MOBILE_ORIGIN = "https://m.aliexpress.com"
 
+# Актуальні верифіковані ендпоінти мобільного чекіну (COIN_CHANNEL_2.0)
+MOBILE_SIGN_LIST_API = "mtop.aliexpress.coin.channel.sign.list"
+MOBILE_SIGN_EXECUTE_API = "mtop.aliexpress.coin.channel.sign.execute"
+MOBILE_SIGN_QUERY_LIST_API = "mtop.aliexpress.social.interactive.sign.model.query.list"
+MOBILE_RECEIVE_PRIZE_API = "mtop.aliexpress.social.interactive.sign.user.receive.prize"
 MOBILE_CHECKIN_APIS = [
-    "mtop.aliexpress.growth.bonus.daily.signin",
-    "mtop.aliexpress.growth.coin.sign.in",
-    "mtop.aliexpress.growth.coin.signin",
-    "mtop.aliexpress.coin.signIn"
+    MOBILE_SIGN_EXECUTE_API,
+    MOBILE_RECEIVE_PRIZE_API
 ]
 
 
@@ -147,10 +151,155 @@ def _collect_nested_dicts(obj: Any, depth: int = 0, max_depth: int = 6) -> List[
     return blocks
 
 
+def _clean_int(val: Any) -> int:
+    """Безпечно парсить цілочисельне значення з будь-якого типу (рядок з комами/пробілами/суфіксами, float), ігноруючи булеві прапорці."""
+    if val is None or isinstance(val, bool):
+        return 0
+    if isinstance(val, (int, float)):
+        try:
+            return int(val)
+        except (ValueError, OverflowError):
+            return 0
+    # Видаляємо пробіли та коми між цифрами, наприклад "1 200" або "1,500"
+    s = re.sub(r'(?<=\d)[\s,]+(?=\d)', '', str(val).strip())
+    m = re.search(r'(\d+)', s)
+    if m:
+        try:
+            return int(m.group(1))
+        except (ValueError, TypeError):
+            pass
+    return 0
+
+
+def _find_mobile_daily_sign_node(res_data: Any) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Знаходить вузол сьогоднішнього дня (calendarDayDistance == 0 або calendarDayDistance відсутнє/None)
+    та елемент signResultList у структурах signQuerySequenceNodeList / dailySignNodeList.
+    Повертає кортеж: (today_node_dict, sign_result_dict).
+    """
+    if res_data is None:
+        return None, None
+    _, json_data = _normalize_res(res_data)
+    if not isinstance(json_data, dict):
+        return None, None
+
+    all_blocks = _collect_nested_dicts(json_data)
+    all_daily_nodes: List[Dict[str, Any]] = []
+    seen_node_ids = set()
+
+    for b in all_blocks:
+        if "dailySignNodeList" in b and isinstance(b["dailySignNodeList"], list):
+            for n in b["dailySignNodeList"]:
+                if isinstance(n, dict) and id(n) not in seen_node_ids:
+                    seen_node_ids.add(id(n))
+                    all_daily_nodes.append(n)
+
+    if not all_daily_nodes:
+        return None, None
+
+    # 1. Перший пріоритет: явне calendarDayDistance == 0
+    today_node: Optional[Dict[str, Any]] = None
+    has_explicit_distances = False
+
+    for node in all_daily_nodes:
+        dist = node.get("calendarDayDistance")
+        if dist is not None and not isinstance(dist, bool):
+            try:
+                d_val = int(float(str(dist).strip()))
+                has_explicit_distances = True
+                if d_val == 0:
+                    today_node = node
+                    break
+            except (ValueError, TypeError):
+                pass
+
+    # 2. Другий пріоритет: прапорці поточного дня (isToday / today / current / signToday / isCurrent)
+    if today_node is None:
+        for node in all_daily_nodes:
+            if any(node.get(k) is True for k in ("isToday", "today", "current", "signToday", "isCurrent")):
+                today_node = node
+                break
+
+    # 3. Якщо ані calendarDayDistance == 0, ані isToday не знайдено:
+    # Якщо всі вузли мають явні ненульові індикатори дистанції (наприклад, +1 чи -1),
+    # ми НЕ підставляємо чужий день! Повертаємо (None, None).
+    if today_node is None:
+        if has_explicit_distances:
+            return None, None
+        # Лише якщо індикатори дистанції повністю відсутні у всіх вузлах, беремо перший вузол
+        for node in all_daily_nodes:
+            if "calendarDayDistance" not in node or node.get("calendarDayDistance") is None:
+                today_node = node
+                break
+
+    if not today_node or not isinstance(today_node, dict):
+        return None, None
+
+    sign_result_list = today_node.get("signResultList")
+    sign_result: Optional[Dict[str, Any]] = None
+    if isinstance(sign_result_list, list) and len(sign_result_list) > 0 and isinstance(sign_result_list[0], dict):
+        sign_result = sign_result_list[0]
+    elif isinstance(sign_result_list, dict):
+        sign_result = sign_result_list
+    elif isinstance(today_node.get("signResult"), dict):
+        sign_result = today_node.get("signResult")
+
+    return today_node, sign_result
+
+
+
+def _extract_node_streak(source_dict: Optional[Dict[str, Any]]) -> int:
+    """Витягує номер дня / стрік із sequenceNumber або подібних ключів."""
+    if not source_dict or not isinstance(source_dict, dict):
+        return 0
+    for key in ("sequenceNumber", "continuousCheckinDays", "continuousDays", "signDays", "streak", "dayNum", "day", "days"):
+        val = source_dict.get(key)
+        if val is not None and not isinstance(val, bool):
+            s_val = _clean_int(val)
+            if s_val > 0:
+                return s_val
+    return 0
+
+
+def _extract_prize_coins(source_dict: Optional[Dict[str, Any]]) -> int:
+    """Витягує кількість монет із prizeInfoList або ключів нагороди."""
+    if not source_dict or not isinstance(source_dict, dict):
+        return 0
+
+    prize_list = source_dict.get("prizeInfoList")
+    if isinstance(prize_list, list):
+        for prize in prize_list:
+            if isinstance(prize, dict):
+                ptype = str(prize.get("prizeType", "")).lower()
+                if "coin" in ptype:
+                    amt = prize.get("prizeAmount") if prize.get("prizeAmount") is not None else (prize.get("amount") if prize.get("amount") is not None else prize.get("coins"))
+                    if amt is not None and not isinstance(amt, bool):
+                        val = _clean_int(amt)
+                        if val > 0:
+                            return val
+        for prize in prize_list:
+            if isinstance(prize, dict):
+                amt = prize.get("prizeAmount") if prize.get("prizeAmount") is not None else (prize.get("amount") if prize.get("amount") is not None else prize.get("coins"))
+                if amt is not None and not isinstance(amt, bool):
+                    val = _clean_int(amt)
+                    if val > 0:
+                        return val
+
+    for key in ("prizeAmount", "awardCoins", "rewardCoins", "bonusAmount", "coins", "amount"):
+        amt = source_dict.get(key)
+        if amt is not None and not isinstance(amt, bool):
+            val = _clean_int(amt)
+            if val > 0:
+                return val
+    return 0
+
+
 def is_already_checked_in(res_data: Any) -> bool:
     """
     Визначає, чи є відповідь свідченням того, що чекін на сьогодні вже був зарахований раніше.
-    Враховує мобільні прапорці hasSignIn, isSignInToday, signToday та ret-коди.
+    Враховує мобільні структури (signQuerySequenceNodeList / dailySignNodeList / signResultList / todayAlreadySign)
+    та прапорці hasSignIn, isSignInToday, signToday і ret-коди.
+    Розрізняє запити списку (sign.list / query.list) та підтвердження свіжого виконання (sign.execute).
     """
     if res_data is None:
         return False
@@ -164,12 +313,12 @@ def is_already_checked_in(res_data: Any) -> bool:
     if isinstance(json_data, dict):
         blocks_to_check = _collect_nested_dicts(json_data)
 
-        # 1. Якщо є явний прапорець, що користувач сьогодні ще НЕ зачекінився
+        # 0. Мобільний прапорець todayAlreadySign: True у відповіді execute — безумовний пріоритет дубліката!
         for b in blocks_to_check:
-            if any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
-                return False
+            if b.get("todayAlreadySign") is True:
+                return True
 
-        # 2. Перевірка ret кодів на повторний чекін (SUCCESS_REPEAT_CHECKIN тощо)
+        # 0.1. Перевірка ret кодів на повторний чекін (SUCCESS_REPEAT_CHECKIN, FAIL_BIZ_REPEAT_CHECKIN тощо)
         ret = json_data.get("ret")
         if isinstance(ret, list):
             for r in ret:
@@ -177,30 +326,77 @@ def is_already_checked_in(res_data: Any) -> bool:
                 if any(ind in r_lower for ind in [
                     "success_repeat_checkin", "repeat_checkin", "already_checked",
                     "already_signed", "has_checked", "has_signed", "haschecked", "ischecked",
-                    "already_signin", "repeat_signin", "has_signin", "signed_today", "already_claimed"
+                    "already_signin", "repeat_signin", "has_signin", "signed_today", "already_claimed",
+                    "fail_biz_repeat_checkin"
                 ]):
                     return True
 
-        # 3. Якщо у відповіді є щойно нараховані монети (awardCoins/rewardCoins/bonusAmount > 0)
-        # і ret не вказує на повтор, це свіжий успішний чекін, а не "already done"!
+        # 0.2. Визначення свіжого виконання чекіну (execute confirmation)
+        api_name = str(json_data.get("api", "")).lower()
+        url_val = ""
+        if hasattr(res_data, "url"):
+            try:
+                url_val = str(res_data.url).lower()
+            except Exception:
+                pass
+
+        is_explicit_exec = any(ep in api_name or ep in url_val for ep in ("sign.execute", "receive.prize", "coin.pc.sign"))
+
+        # Свіжі нагородні монети нового чекіну (awardCoins, rewardCoins, bonusAmount > 0)
         has_fresh_award = False
         for b in blocks_to_check:
             for k in ("awardCoins", "rewardCoins", "bonusAmount"):
                 v = b.get(k)
-                if v is not None:
-                    try:
-                        if int(float(str(v).replace(",", "").strip())) > 0:
-                            has_fresh_award = True
-                            break
-                    except (ValueError, TypeError):
-                        pass
+                if v is not None and not isinstance(v, bool):
+                    if _clean_int(v) > 0:
+                        has_fresh_award = True
+                        break
             if has_fresh_award:
                 break
 
-        if not has_fresh_award:
-            for b in blocks_to_check:
-                if any(b.get(k) is True for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
-                    return True
+        has_top_sign_success = any(
+            isinstance(d, dict) and d.get("signSuccess") is True
+            for d in (
+                json_data,
+                json_data.get("data") if isinstance(json_data.get("data"), dict) else None,
+                json_data.get("data", {}).get("data") if isinstance(json_data.get("data"), dict) and isinstance(json_data.get("data", {}).get("data"), dict) else None
+            )
+            if d is not None
+        )
+
+        today_node, sign_result = _find_mobile_daily_sign_node(json_data)
+        node_has_sign_success = (
+            (sign_result and isinstance(sign_result, dict) and sign_result.get("signSuccess") is True) or
+            (today_node and isinstance(today_node, dict) and today_node.get("signSuccess") is True)
+        )
+
+        # Якщо це явна відповідь виконання (sign.execute або receive.prize):
+        # signSuccess або свіжі нагороди свідчать про свіже виконання, а не про duplicate!
+        if is_explicit_exec:
+            if has_top_sign_success or has_fresh_award or node_has_sign_success:
+                return False
+
+        # Якщо є явний прапорець верхнього рівня signSuccess: True або свіжі нагороди (awardCoins):
+        if has_top_sign_success or has_fresh_award:
+            return False
+
+        # 0.3. Перевірка вузла поточного дня у mobile sign list (signSuccess у signResultList або today_node)
+        # У запитах списку signSuccess: True на сьогоднішньому вузлі свідчить, що чекін уже зроблено!
+        if node_has_sign_success:
+            return True
+
+        # 1. Якщо є явний прапорець, що користувач сьогодні ще НЕ зачекінився
+        for b in blocks_to_check:
+            if any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed", "todayAlreadySign")):
+                return False
+        if sign_result and sign_result.get("signSuccess") is False:
+            return False
+        if today_node and today_node.get("signSuccess") is False:
+            return False
+
+        for b in blocks_to_check:
+            if any(b.get(k) is True for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
+                return True
 
     text_lower = text.lower()
     # Запобігаємо хибному спрацьовуванню на помилки типу "Token already expired" або "Please repeat later"
@@ -209,7 +405,7 @@ def is_already_checked_in(res_data: Any) -> bool:
     if "repeat later" in text_lower or "flow_limit" in text_lower or "rate limit" in text_lower:
         return False
 
-    if any(neg in text_lower for neg in ('"signtoday":false', '"signtoday": false', '"hassignin":false', '"hassignin": false', '"issignintoday":false', '"issignintoday": false')):
+    if any(neg in text_lower for neg in ('"signtoday":false', '"signtoday": false', '"hassignin":false', '"hassignin": false', '"issignintoday":false', '"issignintoday": false', '"todayalreadysign":false', '"todayalreadysign": false')):
         return False
 
     indicators = [
@@ -267,6 +463,7 @@ def is_checkin_success(res_data: Any) -> bool:
     """
     Безпечно перевіряє успішність виконання нового чекіну в JSON-відповіді або Response.
     Запобігає IndexError, TypeError та хибним спрацьовуванням від шлюзів MTOP при бізнес-помилках.
+    Підтримує прапорець signSuccess: True у відповідях мобільного виконання.
     """
     if res_data is None:
         return False
@@ -280,9 +477,18 @@ def is_checkin_success(res_data: Any) -> bool:
 
     res_data = json_data
 
-    # Перевірка на явний прапорець невдачі на верхньому рівні
-    if res_data.get("success") is False:
+    # Перевірка на явний прапорець невдачі на верхніх рівнях
+    if res_data.get("success") is False or res_data.get("signSuccess") is False:
         return False
+
+    data_block = res_data.get("data")
+    if isinstance(data_block, dict):
+        if data_block.get("success") is False or data_block.get("signSuccess") is False:
+            return False
+        inner = data_block.get("data")
+        if isinstance(inner, dict):
+            if inner.get("success") is False or inner.get("signSuccess") is False:
+                return False
 
     # Збираємо всі словники на всіх рівнях вкладеності (data, result, signInResult, module, тощо)
     all_blocks = _collect_nested_dicts(res_data)
@@ -295,9 +501,24 @@ def is_checkin_success(res_data: Any) -> bool:
         if any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
             return False
 
-    # Явний прапорець успіху на рівні відповіді або будь-якого вкладеного блоку
+    # Якщо на сьогоднішньому вузлі мобільного списку чекін не виконано (signSuccess is False),
+    # і немає явного прапорця успіху на рівні виконання — це не успішний чекін
+    has_top_sign_success = any(
+        isinstance(d, dict) and (d.get("signSuccess") is True or d.get("success") is True)
+        for d in (res_data, data_block, (data_block.get("data") if isinstance(data_block, dict) else None))
+        if d is not None
+    )
+
+    today_node, sign_result = _find_mobile_daily_sign_node(res_data)
+    if not has_top_sign_success:
+        if sign_result and sign_result.get("signSuccess") is False:
+            return False
+        elif today_node and today_node.get("signSuccess") is False:
+            return False
+
+    # Явний прапорець успіху на рівні відповіді або будь-якого вкладеного блоку (включаючи signSuccess: True)
     for b in all_blocks:
-        if b.get("success") is True:
+        if b.get("success") is True or b.get("signSuccess") is True:
             return True
 
     # Перевірка статусу шлюзу MTOP при відсутності помилок
@@ -353,16 +574,58 @@ class CheckinManager:
         """
         Формує параметри MTOP з обов'язковим хеш-підписом sign та актуальним timestamp.
         """
+        is_mobile = (
+            api in (MOBILE_SIGN_EXECUTE_API, MOBILE_SIGN_LIST_API, MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API)
+            or api in MOBILE_CHECKIN_APIS
+            or "coin.channel." in api
+            or "interactive.sign" in api
+            or "growth." in api
+        )
+        asac_val = ASAC_MOBILE_CAMPAIGN if is_mobile else ASAC_CAMPAIGN
+
         if data is None:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
-            elif api in MOBILE_CHECKIN_APIS:
-                data_obj = {"channel": "COIN", "asac": ASAC_CAMPAIGN}
+            elif api == MOBILE_SIGN_EXECUTE_API:
+                data_obj = {
+                    "playCode": "COIN_CHANNEL_2.0",
+                    "signTimeMills": int(time.time() * 1000),
+                    "asac": asac_val,
+                    "_lang": "en_KR",
+                    "_currency": "USD"
+                }
+            elif api == MOBILE_SIGN_LIST_API:
+                data_obj = {
+                    "playCode": "COIN_CHANNEL_2.0",
+                    "asac": asac_val,
+                    "_lang": "en_KR",
+                    "_currency": "USD"
+                }
+            elif api in (MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API) or api in MOBILE_CHECKIN_APIS:
+                data_obj = {"channel": "COIN", "asac": asac_val}
             else:
-                data_obj = {"asac": ASAC_CAMPAIGN, "_lang": "en_KR", "_currency": "USD"}
+                data_obj = {"asac": asac_val, "_lang": "en_KR", "_currency": "USD"}
             data_str = json.dumps(data_obj, separators=(",", ":"))
         elif isinstance(data, dict):
-            data_str = json.dumps(data, separators=(",", ":"))
+            data_copy = dict(data)
+            if is_mobile:
+                data_copy["asac"] = asac_val
+            elif "asac" not in data_copy and api != "mtop.aliexpress.coin.execute":
+                data_copy["asac"] = asac_val
+            data_str = json.dumps(data_copy, separators=(",", ":"))
+        elif isinstance(data, str):
+            try:
+                parsed_data = json.loads(data)
+                if isinstance(parsed_data, dict):
+                    if is_mobile:
+                        parsed_data["asac"] = asac_val
+                    elif "asac" not in parsed_data and api != "mtop.aliexpress.coin.execute":
+                        parsed_data["asac"] = asac_val
+                    data_str = json.dumps(parsed_data, separators=(",", ":"))
+                else:
+                    data_str = data
+            except Exception:
+                data_str = data
         else:
             data_str = str(data)
 
@@ -386,7 +649,7 @@ class CheckinManager:
             "v": "1.0",
             "type": "originaljson",
             "dataType": "json",
-            "asac": ASAC_CAMPAIGN,
+            "asac": asac_val,
             "data": data_str
         }
 
@@ -401,13 +664,21 @@ class CheckinManager:
         із підтримкою автоматичного відновлення (Self-Healing) токена.
         """
         url = f"https://acs.aliexpress.com/h5/{api}/1.0/"
-        referer = COIN_MOBILE_REFERER if api in MOBILE_CHECKIN_APIS else COIN_PC_REFERER
-        origin = MOBILE_ORIGIN if api in MOBILE_CHECKIN_APIS else ORIGIN
+        is_mobile_api = (
+            api in MOBILE_CHECKIN_APIS or
+            api in (MOBILE_SIGN_LIST_API, MOBILE_SIGN_EXECUTE_API, MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API) or
+            "coin.channel." in api or
+            "interactive.sign" in api or
+            "growth." in api
+        )
+        referer = COIN_MOBILE_REFERER if is_mobile_api else COIN_PC_REFERER
+        origin = MOBILE_ORIGIN if is_mobile_api else ORIGIN
+        asac_header = ASAC_MOBILE_CAMPAIGN if is_mobile_api else ASAC_CAMPAIGN
         headers = {
             "Referer": referer,
             "Origin": origin,
             "Content-Type": "application/x-www-form-urlencoded",
-            "asac": ASAC_CAMPAIGN,
+            "asac": asac_header,
         }
 
         # Якщо токен ще відсутній у сесії, виконуємо probe-запит для отримання _m_h5_tk від шлюзу
@@ -451,6 +722,9 @@ class CheckinManager:
                     continue
 
                 res_data = resp.json()
+                if isinstance(res_data, dict) and "api" not in res_data:
+                    res_data["api"] = api
+
                 logger.info(f"[{self.account_name}] Відповідь від {url}: {res_data}")
 
                 if is_captcha_required(res_data):
@@ -635,12 +909,23 @@ class CheckinManager:
         target_dict = data_block if isinstance(data_block, dict) else res_data
         inner_dict = target_dict.get("data") if isinstance(target_dict, dict) and isinstance(target_dict.get("data"), dict) else {}
 
+        # 0. Мобільні структури signQuerySequenceNodeList / dailySignNodeList / signResultList
+        today_node, sign_result = _find_mobile_daily_sign_node(res_data)
+        if today_node or sign_result:
+            node_streak = _extract_node_streak(sign_result) or _extract_node_streak(today_node)
+            if node_streak > 0:
+                self.streak_days = max(self.streak_days, node_streak)
+            if extract_coins:
+                node_coins = _extract_prize_coins(sign_result) or _extract_prize_coins(today_node)
+                if node_coins > 0:
+                    self.coins_earned = max(self.coins_earned, node_coins)
+
         # Дні стріку
         extracted_days = None
         for d in (inner_dict, target_dict, res_data):
             for key in [
                 "continuousCheckinDays", "continuousDays", "signDays", "streak",
-                "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay"
+                "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay", "sequenceNumber"
             ]:
                 val = d.get(key)
                 if val is not None and isinstance(val, (int, str, float)):
@@ -650,6 +935,17 @@ class CheckinManager:
                             extracted_days = days if extracted_days is None else max(extracted_days, days)
                     except (ValueError, TypeError):
                         pass
+
+        # Також перевіряємо всі вкладені блоки на sequenceNumber
+        for b in _collect_nested_dicts(res_data):
+            seq = b.get("sequenceNumber")
+            if seq is not None and isinstance(seq, (int, str, float)):
+                try:
+                    s_val = int(float(str(seq).replace(",", "").strip()))
+                    if s_val > 0:
+                        extracted_days = s_val if extracted_days is None else max(extracted_days, s_val)
+                except (ValueError, TypeError):
+                    pass
 
         if extracted_days is not None:
             self.streak_days = extracted_days
@@ -667,16 +963,26 @@ class CheckinManager:
             for d in (inner_dict, target_dict, res_data):
                 for key in [
                     "awardCoins", "coinCount", "points", "awardPoints",
-                    "coin", "coins", "amount", "rewardCoins", "bonusAmount"
+                    "coin", "coins", "amount", "rewardCoins", "bonusAmount", "prizeAmount"
                 ]:
                     val = d.get(key)
                     if val is not None and isinstance(val, (int, str, float)):
                         try:
                             coins = int(float(str(val).replace(",", "").strip()))
                             if coins > 0:
-                                self.coins_earned = coins
+                                self.coins_earned = max(self.coins_earned, coins)
                         except (ValueError, TypeError):
                             pass
+
+                p_coins = _extract_prize_coins(d)
+                if p_coins > 0:
+                    self.coins_earned = max(self.coins_earned, p_coins)
+
+            # Також шукаємо prizeInfoList / prizeAmount у всіх вкладених блоках
+            for b in _collect_nested_dicts(res_data):
+                p_coins = _extract_prize_coins(b)
+                if p_coins > 0:
+                    self.coins_earned = max(self.coins_earned, p_coins)
 
             # Якщо coins_earned ще 0, перевіряємо signList за номером стріку
             if self.coins_earned == 0:
@@ -704,34 +1010,28 @@ class CheckinManager:
             if not isinstance(res_data, dict):
                 return 0, 0
 
-        blocks = []
+        streak = 0
+        coins = 0
 
-        def _collect(obj, depth=0):
-            if depth > 4:
-                return
-            if isinstance(obj, dict):
-                blocks.append(obj)
-                for k in ("data", "result", "bonus", "reward", "signInInfo", "signInResult", "module", "signInDTO", "signResult"):
-                    v = obj.get(k)
-                    if v is not None:
-                        _collect(v, depth + 1)
-            elif isinstance(obj, list):
-                for item in obj:
-                    if isinstance(item, (dict, list)):
-                        _collect(item, depth + 1)
+        # 0. Структури signQuerySequenceNodeList / dailySignNodeList / signResultList
+        today_node, sign_result = _find_mobile_daily_sign_node(res_data)
+        if today_node or sign_result:
+            node_streak = _extract_node_streak(sign_result) or _extract_node_streak(today_node)
+            if node_streak > 0:
+                streak = max(streak, node_streak)
+            node_coins = _extract_prize_coins(sign_result) or _extract_prize_coins(today_node)
+            if node_coins > 0:
+                coins = max(coins, node_coins)
 
-        _collect(res_data)
+        blocks = _collect_nested_dicts(res_data)
 
         streak_keys = [
-            "continuousCheckinDays", "continuousDays", "signDays", "streak",
+            "sequenceNumber", "continuousCheckinDays", "continuousDays", "signDays", "streak",
             "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay"
         ]
         # Специфічні ключі нагороди мають пріоритет над загальними лічильниками балансу
-        primary_coin_keys = ["awardCoins", "rewardCoins", "bonusAmount", "amount"]
+        primary_coin_keys = ["prizeAmount", "awardCoins", "rewardCoins", "bonusAmount", "amount"]
         secondary_coin_keys = ["coins", "coin", "points", "awardPoints", "coinCount"]
-
-        streak = 0
-        coins = 0
 
         # Перевірка чи є явний негативний прапорець (тоді монети в об'єкті — старі/попередні)
         has_negative_signin = any(
@@ -751,8 +1051,11 @@ class CheckinManager:
                         pass
 
         if not has_negative_signin:
-            # 1. Шукаємо серед специфічних ключів винагороди
+            # 1. Шукаємо серед специфічних ключів винагороди та prizeInfoList
             for b in blocks:
+                p_coins = _extract_prize_coins(b)
+                if p_coins > 0:
+                    coins = max(coins, p_coins)
                 for ck in primary_coin_keys:
                     val = b.get(ck)
                     if val is not None and isinstance(val, (int, str, float)):
@@ -919,81 +1222,238 @@ class CheckinManager:
             logger.warning(f"[{self.account_name}] ⚠️ [Канал PC] Не отримано відповіді від ендпоінту чекіну.")
             return pc_result
 
-    def _run_mobile_checkin(self) -> Dict[str, Any]:
+    def _checkin_mobile_channel(self) -> Dict[str, Any]:
         """
-        Виконує чекін каналу Mobile App через growth ендпоінти із підтримкою fallback:
-        - mtop.aliexpress.growth.bonus.daily.signin
-        - mtop.aliexpress.growth.coin.sign.in
-        - mtop.aliexpress.growth.coin.signin
-        - mtop.aliexpress.coin.signIn
+        Виконує повний потік мобільного чекіну:
+        a) Запит до MOBILE_SIGN_LIST_API для перевірки статусу та стріку.
+        b) Якщо не зачекінено -> виконання через MOBILE_SIGN_EXECUTE_API.
+        c) За потреби fallback до допоміжних ендпоінтів з MOBILE_CHECKIN_APIS.
         Повертає словник: {"status": ..., "coins": ..., "streak": ...}
         """
         logger.info(f"[{self.account_name}] 📱 [Канал Mobile] Початок перевірки та чекіну мобільного додатку...")
         mobile_result = {"status": "FAILED", "coins": 0, "streak": 0}
-        mobile_payload = {"channel": "COIN", "asac": ASAC_CAMPAIGN}
+        potential_streak = 0
+        potential_coins = 0
 
-        for api in MOBILE_CHECKIN_APIS:
-            logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Запит до {api}...")
-            res = self._call_mtop(api, data=mobile_payload)
+        # a) Запит до MOBILE_SIGN_LIST_API з fallback до MOBILE_SIGN_QUERY_LIST_API
+        logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Запит статусу чекіну до {MOBILE_SIGN_LIST_API}...")
+        list_res = self._call_mtop(MOBILE_SIGN_LIST_API)
 
-            if self.status == "CAPTCHA_REQUIRED":
-                mobile_result["status"] = "CAPTCHA_REQUIRED"
-                return mobile_result
+        if self.status == "CAPTCHA_REQUIRED":
+            mobile_result["status"] = "CAPTCHA_REQUIRED"
+            return mobile_result
 
-            if not res:
-                logger.debug(f"[{self.account_name}] ⚠️ [Канал Mobile] Немає відповіді від {api}, спроба наступного ендпоінту...")
-                continue
-
-            if is_captcha_required(res):
+        # Перевірка на капчу та сесію ПЕРЕД fallback-запитом
+        if list_res:
+            if is_captcha_required(list_res):
                 self.status = "CAPTCHA_REQUIRED"
-                logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {api} повернув вимогу капчі (WAF)!")
+                logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {MOBILE_SIGN_LIST_API} вимагає капчі (WAF)!")
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
 
-            if is_session_expired(res):
+            if is_session_expired(list_res):
                 self.session_valid = False
                 self.status = "SESSION_EXPIRED"
                 logger.error(f"[{self.account_name}] ❌ [Канал Mobile] Сесія недійсна або прострочена!")
                 mobile_result["status"] = "SESSION_EXPIRED"
                 return mobile_result
 
-            coins, streak = self._extract_mobile_data(res)
+        # Fallback до MOBILE_SIGN_QUERY_LIST_API якщо sign.list повернув None або не містить валідних даних
+        if not list_res or (not _find_mobile_daily_sign_node(list_res)[0] and not is_already_checked_in(list_res)):
+            logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Спроба допоміжного запиту списку через {MOBILE_SIGN_QUERY_LIST_API}...")
+            query_res = self._call_mtop(MOBILE_SIGN_QUERY_LIST_API)
+            if self.status == "CAPTCHA_REQUIRED":
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+            if query_res:
+                if is_captcha_required(query_res):
+                    self.status = "CAPTCHA_REQUIRED"
+                    mobile_result["status"] = "CAPTCHA_REQUIRED"
+                    return mobile_result
+                if is_session_expired(query_res):
+                    self.session_valid = False
+                    self.status = "SESSION_EXPIRED"
+                    logger.error(f"[{self.account_name}] ❌ [Канал Mobile] Сесія недійсна або прострочена!")
+                    mobile_result["status"] = "SESSION_EXPIRED"
+                    return mobile_result
+                list_res = query_res
 
-            if is_already_checked_in(res):
+        if list_res:
+            today_node, sign_result = _find_mobile_daily_sign_node(list_res)
+            if today_node or sign_result:
+                node_streak = _extract_node_streak(sign_result) or _extract_node_streak(today_node)
+                node_coins = _extract_prize_coins(sign_result) or _extract_prize_coins(today_node)
+                if node_streak > 0:
+                    potential_streak = node_streak
+                if node_coins > 0:
+                    potential_coins = node_coins
+
+                sign_success = None
+                if sign_result and "signSuccess" in sign_result:
+                    sign_success = sign_result.get("signSuccess")
+                elif today_node and "signSuccess" in today_node:
+                    sign_success = today_node.get("signSuccess")
+
+                if sign_success is True:
+                    mobile_result["status"] = "ALREADY_DONE"
+                    mobile_result["coins"] = potential_coins
+                    mobile_result["streak"] = potential_streak
+                    logger.info(
+                        f"[{self.account_name}] ℹ️ [Канал Mobile] Чекін уже зараховано сьогодні за даними списку "
+                        f"({MOBILE_SIGN_LIST_API}, стрік: {potential_streak} дн., монети: {potential_coins})"
+                    )
+                    return mobile_result
+            elif is_already_checked_in(list_res):
+                coins, streak = self._extract_mobile_data(list_res)
                 mobile_result["status"] = "ALREADY_DONE"
-                mobile_result["coins"] = coins
-                mobile_result["streak"] = streak
-                logger.info(f"[{self.account_name}] ℹ️ [Канал Mobile] Чекін уже зараховано сьогодні ({api}, стрік: {streak} дн.)")
+                mobile_result["coins"] = coins or potential_coins
+                mobile_result["streak"] = streak or potential_streak
+                logger.info(f"[{self.account_name}] ℹ️ [Канал Mobile] Чекін уже зараховано сьогодні ({MOBILE_SIGN_LIST_API})")
                 return mobile_result
 
-            if is_checkin_success(res):
+        # b) Якщо не зараховано, викликаємо MOBILE_SIGN_EXECUTE_API
+        logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Виконання чекіну через {MOBILE_SIGN_EXECUTE_API}...")
+        exec_res = self._call_mtop(MOBILE_SIGN_EXECUTE_API)
+
+        if self.status == "CAPTCHA_REQUIRED":
+            mobile_result["status"] = "CAPTCHA_REQUIRED"
+            return mobile_result
+
+        if exec_res:
+            if is_captcha_required(exec_res):
+                self.status = "CAPTCHA_REQUIRED"
+                logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {MOBILE_SIGN_EXECUTE_API} повернув вимогу капчі (WAF)!")
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+
+            if is_session_expired(exec_res):
+                self.session_valid = False
+                self.status = "SESSION_EXPIRED"
+                logger.error(f"[{self.account_name}] ❌ [Канал Mobile] Сесія недійсна або прострочена!")
+                mobile_result["status"] = "SESSION_EXPIRED"
+                return mobile_result
+
+            _, exec_dict = _normalize_res(exec_res)
+            exec_dict = exec_dict if isinstance(exec_dict, dict) else {}
+
+            exec_today_node, exec_sign_result = _find_mobile_daily_sign_node(exec_res)
+            node_sign_success = (
+                (exec_sign_result and exec_sign_result.get("signSuccess") is True) or
+                (exec_today_node and exec_today_node.get("signSuccess") is True)
+            )
+
+            today_already = any(b.get("todayAlreadySign") is True for b in _collect_nested_dicts(exec_res))
+            top_or_data_sign_success = any(
+                isinstance(d, dict) and d.get("signSuccess") is True
+                for d in (
+                    exec_dict,
+                    exec_dict.get("data") if isinstance(exec_dict.get("data"), dict) else None,
+                    exec_dict.get("data", {}).get("data") if isinstance(exec_dict.get("data"), dict) and isinstance(exec_dict.get("data", {}).get("data"), dict) else None
+                )
+                if d is not None
+            )
+
+            # 1. Перевірка на свіжий успіх виконання ПЕРШОЮ чергою (Fresh execution FIRST)
+            if not today_already and (is_checkin_success(exec_res) or top_or_data_sign_success or node_sign_success):
+                coins, streak = self._extract_mobile_data(exec_res)
                 mobile_result["status"] = "SUCCESS"
-                mobile_result["coins"] = coins
-                mobile_result["streak"] = streak if streak > 0 else 1
-                logger.info(f"[{self.account_name}] ✅ [Канал Mobile] Чекін успішно виконано через {api}! (Стрік: {mobile_result['streak']} дн., Монет: +{mobile_result['coins']})")
+                mobile_result["coins"] = coins or potential_coins
+                final_streak = streak or potential_streak
+                mobile_result["streak"] = final_streak if final_streak > 0 else 1
+                logger.info(f"[{self.account_name}] ✅ [Канал Mobile] Чекін успішно виконано через {MOBILE_SIGN_EXECUTE_API}! (Стрік: {mobile_result['streak']} дн., Монет: +{mobile_result['coins']})")
                 return mobile_result
 
-            logger.debug(f"[{self.account_name}] ⚠️ [Канал Mobile] Відповідь від {api} не є успіхом чекіну, переходимо до fallback...")
+            # 2. Якщо не свіжий успіх, перевіряємо на повторний чекін
+            if today_already or is_already_checked_in(exec_res):
+                coins, streak = self._extract_mobile_data(exec_res)
+                mobile_result["status"] = "ALREADY_DONE"
+                mobile_result["coins"] = coins or potential_coins
+                mobile_result["streak"] = streak or potential_streak
+                logger.info(f"[{self.account_name}] ℹ️ [Канал Mobile] Чекін уже зараховано сьогодні ({MOBILE_SIGN_EXECUTE_API}, стрік: {mobile_result['streak']} дн.)")
+                return mobile_result
 
-        logger.info(f"[{self.account_name}] ⚠️ [Канал Mobile] Усі мобільні growth-ендпоінти вичерпано без підтвердження.")
+        # c) Fallback до інших ендпоінтів у MOBILE_CHECKIN_APIS
+        for api in MOBILE_CHECKIN_APIS:
+            if api == MOBILE_SIGN_EXECUTE_API:
+                continue
+            logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Спроба fallback ендпоінту {api}...")
+            res = self._call_mtop(api)
+            if self.status == "CAPTCHA_REQUIRED":
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+            if not res:
+                continue
+            if is_captcha_required(res):
+                self.status = "CAPTCHA_REQUIRED"
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+            if is_session_expired(res):
+                self.session_valid = False
+                self.status = "SESSION_EXPIRED"
+                mobile_result["status"] = "SESSION_EXPIRED"
+                return mobile_result
+
+            _, res_dict = _normalize_res(res)
+            res_dict = res_dict if isinstance(res_dict, dict) else {}
+
+            fb_today_node, fb_sign_result = _find_mobile_daily_sign_node(res)
+            fb_node_sign_success = (
+                (fb_sign_result and fb_sign_result.get("signSuccess") is True) or
+                (fb_today_node and fb_today_node.get("signSuccess") is True)
+            )
+
+            today_already = any(b.get("todayAlreadySign") is True for b in _collect_nested_dicts(res))
+            top_or_data_sign_success = any(
+                isinstance(d, dict) and d.get("signSuccess") is True
+                for d in (
+                    res_dict,
+                    res_dict.get("data") if isinstance(res_dict.get("data"), dict) else None,
+                    res_dict.get("data", {}).get("data") if isinstance(res_dict.get("data"), dict) and isinstance(res_dict.get("data", {}).get("data"), dict) else None
+                )
+                if d is not None
+            )
+
+            # 1. Перевірка на свіжий успіх виконання ПЕРШОЮ чергою (Fresh execution FIRST)
+            if not today_already and (is_checkin_success(res) or top_or_data_sign_success or fb_node_sign_success):
+                coins, streak = self._extract_mobile_data(res)
+                mobile_result["status"] = "SUCCESS"
+                mobile_result["coins"] = coins or potential_coins
+                mobile_result["streak"] = streak or potential_streak or 1
+                return mobile_result
+
+            # 2. Якщо не свіжий успіх, перевіряємо на повторний чекін
+            if today_already or is_already_checked_in(res):
+                coins, streak = self._extract_mobile_data(res)
+                mobile_result["status"] = "ALREADY_DONE"
+                mobile_result["coins"] = coins or potential_coins
+                mobile_result["streak"] = streak or potential_streak
+                return mobile_result
+
+        logger.info(f"[{self.account_name}] ⚠️ [Канал Mobile] Усі мобільні ендпоінти вичерпано без підтвердження.")
+        mobile_result["streak"] = potential_streak
         return mobile_result
+
+    def _run_mobile_checkin(self) -> Dict[str, Any]:
+        """Аліас для зворотної сумісності."""
+        return self._checkin_mobile_channel()
 
     def run_checkin(self) -> bool:
         """
         Виконує Dual-Channel щоденний чекін:
         1) PC Desktop Channel (coin-pc-index / mtop.aliexpress.coin.pc.sign)
-        2) Mobile App Channel (growth endpoints: bonus.daily.signin / coin.sign.in)
+        2) Mobile App Channel (mtop.aliexpress.coin.channel.sign.list / sign.execute)
         3) Graceful orchestration & об'єднання результатів:
            - Якщо хоча б один канал SUCCESS -> загальний статус SUCCESS
            - Якщо обидва ALREADY_DONE -> ALREADY_DONE
            - Якщо один ALREADY_DONE, а інший FAILED -> ALREADY_DONE
            - Якщо обидва FAILED -> FAILED
-           - Якщо капча -> CAPTCHA_REQUIRED
-           - Сумування монет з обох каналів
-           - Встановлення найвищого стріку (пріоритет мобільного, якщо вищий)
+           - Якщо капча -> CAPTCHA_REQUIRED (якщо PC не був SUCCESS/ALREADY_DONE)
+           - Сумування монет виключно з каналів, де чекін виконано вперше (SUCCESS)
+           - Встановлення максимального стріку між обома каналами
         4) Отримання актуального балансу через mtop.aliexpress.coin.execute
         """
         logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну (Dual-Channel: PC + Mobile)...")
+        self.coins_earned = 0
 
         # 1. Запуск PC Desktop чекіну
         pc_res = self._run_pc_checkin()
@@ -1021,6 +1481,7 @@ class CheckinManager:
             if pc_status in ("SUCCESS", "ALREADY_DONE"):
                 logger.warning(f"[{self.account_name}] 🧩 Канал Mobile вимагає капчі, але чекін на PC вже успішно зараховано ({pc_status})!")
                 mobile_status = "CAPTCHA_REQUIRED"
+                self.status = pc_status
             else:
                 self.status = "CAPTCHA_REQUIRED"
                 return False
@@ -1031,6 +1492,7 @@ class CheckinManager:
                 logger.warning(f"[{self.account_name}] ⚠️ Канал Mobile повернув недійсну сесію, але чекін на PC вже успішно зараховано ({pc_status})!")
                 self.session_valid = True
                 mobile_status = "SESSION_EXPIRED"
+                self.status = pc_status
             else:
                 self.status = "SESSION_EXPIRED"
                 return False
@@ -1043,21 +1505,23 @@ class CheckinManager:
         else:
             self.status = "FAILED"
 
-        # 4. Об'єднання зароблених монет: якщо обидва канали показують ALREADY_DONE, не дублюємо нагороду
-        if pc_status == "ALREADY_DONE" and mobile_status == "ALREADY_DONE":
+        # 4. Об'єднання зароблених монет:
+        # Монети, зароблені в цьому запуску, зараховуються лише від каналів зі свіжим SUCCESS.
+        # Монети від ALREADY_DONE ніколи не додаються до свіжого SUCCESS!
+        if pc_status == "SUCCESS" or mobile_status == "SUCCESS":
+            fresh_coins = 0
+            if pc_status == "SUCCESS":
+                fresh_coins += pc_coins
+            if mobile_status == "SUCCESS":
+                fresh_coins += mobile_coins
+            self.coins_earned = fresh_coins
+        elif pc_status == "ALREADY_DONE" or mobile_status == "ALREADY_DONE":
             self.coins_earned = max(pc_coins, mobile_coins)
         else:
-            self.coins_earned = pc_coins + mobile_coins
+            self.coins_earned = 0
 
-        # 5. Встановлення стріку (найвищий активний стрік, з пріоритетом мобільного якщо вищий або однаковий)
-        if mobile_streak > 0 and pc_streak > 0:
-            self.streak_days = mobile_streak if mobile_streak >= pc_streak else pc_streak
-        elif mobile_streak > 0:
-            self.streak_days = mobile_streak
-        elif pc_streak > 0:
-            self.streak_days = pc_streak
-        else:
-            self.streak_days = 0
+        # 5. Встановлення стріку (найвищий активний стрік по обох каналах)
+        self.streak_days = max(pc_streak, mobile_streak, 0)
 
         # Збереження деталізованої інформації по каналах
         self.pc_status = pc_status

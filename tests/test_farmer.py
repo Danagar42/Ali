@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import unittest
 from unittest.mock import patch, MagicMock
 import requests
@@ -8,7 +9,8 @@ from src.config import (
     BROWSER_PROFILES,
     get_random_browser_profile,
     get_client_hints_for_ua,
-    get_random_user_agent
+    get_random_user_agent,
+    ASAC_MOBILE_CAMPAIGN
 )
 from src.auth import (
     parse_cookie_string,
@@ -23,7 +25,14 @@ from src.checkin import (
     is_already_checked_in,
     is_captcha_required,
     CheckinManager,
-    MOBILE_CHECKIN_APIS
+    MOBILE_CHECKIN_APIS,
+    MOBILE_SIGN_LIST_API,
+    MOBILE_SIGN_EXECUTE_API,
+    MOBILE_SIGN_QUERY_LIST_API,
+    MOBILE_RECEIVE_PRIZE_API,
+    _find_mobile_daily_sign_node,
+    _extract_prize_coins,
+    _extract_node_streak
 )
 from src.coins import CoinsFarmManager, REPORT_TASK_URLS
 from src.coupons import CouponCollector
@@ -1700,7 +1709,7 @@ class TestDualChannelCheckin(unittest.TestCase):
             def mock_call(api, data=None):
                 if api == "mtop.aliexpress.coin.pc.sign.list":
                     return pc_status_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -1709,8 +1718,7 @@ class TestDualChannelCheckin(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(mgr.status, "SUCCESS")
             self.assertEqual(mgr.pc_status, "ALREADY_DONE")
-            self.assertEqual(mgr.mobile_status, "SUCCESS")
-            self.assertEqual(mgr.coins_earned, 40)  # 15 from PC already done + 25 from fresh Mobile
+            self.assertEqual(mgr.coins_earned, 25)  # 25 from fresh Mobile (15 from PC already done must NOT be added!)
             self.assertEqual(mgr.streak_days, 4, "Mobile streak 4 must be prioritized over PC streak 3!")
 
     def test_mobile_checkin_already_done_scenario(self):
@@ -1742,7 +1750,7 @@ class TestDualChannelCheckin(unittest.TestCase):
             def mock_call(api, data=None):
                 if api == "mtop.aliexpress.coin.pc.sign.list":
                     return pc_status_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_LIST_API, MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -1803,7 +1811,7 @@ class TestDualChannelCheckin(unittest.TestCase):
                     return pc_status_res
                 if api == "mtop.aliexpress.coin.pc.sign":
                     return pc_sign_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_res
                 if api == "mtop.aliexpress.coin.execute":
                     return balance_res
@@ -1861,11 +1869,11 @@ class TestDualChannelCheckin(unittest.TestCase):
                     return pc_status_res
                 if api == "mtop.aliexpress.coin.pc.sign":
                     return pc_sign_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_LIST_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_res_1
-                if api == "mtop.aliexpress.growth.coin.sign.in":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.coin.sign.in"):
                     return mobile_res_2
-                if api == "mtop.aliexpress.growth.coin.signin":
+                if api in ("mtop.aliexpress.social.interactive.sign.user.receive.prize", "mtop.aliexpress.growth.coin.signin"):
                     return mobile_res_3
                 return None
             mock_mtop.side_effect = mock_call
@@ -1877,9 +1885,15 @@ class TestDualChannelCheckin(unittest.TestCase):
             self.assertEqual(mgr.mobile_status, "SUCCESS")
             self.assertEqual(mgr.coins_earned, 35)
             self.assertEqual(mgr.streak_days, 4)
-            self.assertIn("mtop.aliexpress.growth.bonus.daily.signin", calls_made)
-            self.assertIn("mtop.aliexpress.growth.coin.sign.in", calls_made)
-            self.assertIn("mtop.aliexpress.growth.coin.signin", calls_made)
+            self.assertTrue(
+                MOBILE_SIGN_LIST_API in calls_made or "mtop.aliexpress.growth.bonus.daily.signin" in calls_made
+            )
+            self.assertTrue(
+                MOBILE_SIGN_EXECUTE_API in calls_made or "mtop.aliexpress.growth.coin.sign.in" in calls_made
+            )
+            self.assertTrue(
+                "mtop.aliexpress.social.interactive.sign.user.receive.prize" in calls_made or "mtop.aliexpress.growth.coin.signin" in calls_made
+            )
 
     def test_mobile_captcha_handling_aborts_immediately(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_captcha_123"})
@@ -1903,7 +1917,7 @@ class TestDualChannelCheckin(unittest.TestCase):
                     return pc_status_res
                 if api == "mtop.aliexpress.coin.pc.sign":
                     return pc_status_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_LIST_API, MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_captcha_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -1931,7 +1945,7 @@ class TestDualChannelCheckin(unittest.TestCase):
                     return pc_status_res
                 if api == "mtop.aliexpress.coin.pc.sign":
                     return pc_status_res
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_LIST_API, MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_session_expired_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -2045,7 +2059,7 @@ class TestDualChannelCheckin(unittest.TestCase):
         with patch.object(mgr, "_call_mtop") as mock_mtop, \
              patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
             def mock_call(api, data=None):
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_res
                 # all PC endpoints fail
                 return None
@@ -2078,7 +2092,7 @@ class TestDualChannelCheckin(unittest.TestCase):
             def mock_call(api, data=None):
                 if api == "mtop.aliexpress.coin.pc.sign.list":
                     return None
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return fresh_mobile_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -2122,9 +2136,9 @@ class TestDualChannelCheckin(unittest.TestCase):
                 calls_made.append(api)
                 if api == "mtop.aliexpress.coin.pc.sign.list":
                     return None
-                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                if api in (MOBILE_SIGN_LIST_API, "mtop.aliexpress.growth.bonus.daily.signin"):
                     return mobile_info_res
-                if api == "mtop.aliexpress.growth.coin.sign.in":
+                if api in (MOBILE_SIGN_EXECUTE_API, "mtop.aliexpress.growth.coin.sign.in"):
                     return mobile_real_checkin_res
                 return None
             mock_mtop.side_effect = mock_call
@@ -2134,8 +2148,12 @@ class TestDualChannelCheckin(unittest.TestCase):
             self.assertEqual(mgr.status, "SUCCESS")
             self.assertEqual(mgr.coins_earned, 25, "Must earn coins from real endpoint 2, not preview coins from endpoint 1!")
             self.assertEqual(mgr.streak_days, 3)
-            self.assertIn("mtop.aliexpress.growth.bonus.daily.signin", calls_made)
-            self.assertIn("mtop.aliexpress.growth.coin.sign.in", calls_made)
+            self.assertTrue(
+                MOBILE_SIGN_LIST_API in calls_made or "mtop.aliexpress.growth.bonus.daily.signin" in calls_made
+            )
+            self.assertTrue(
+                MOBILE_SIGN_EXECUTE_API in calls_made or "mtop.aliexpress.growth.coin.sign.in" in calls_made
+            )
 
     def test_mobile_extract_data_list_wrapped_payload(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_list_wrap_123"})
@@ -2285,6 +2303,862 @@ class TestDualChannelCheckin(unittest.TestCase):
             'data': {}
         }
         self.assertFalse(is_already_checked_in(res_expired), "Expired session must not be diagnosed as ALREADY_DONE!")
+
+class TestMobileCoinChannelCheckin(unittest.TestCase):
+    """
+    Автоматизовані регресійні тести для нового мобільного каналу чекіну:
+    - mtop.aliexpress.coin.channel.sign.list (COIN_CHANNEL_2.0)
+    - mtop.aliexpress.coin.channel.sign.execute (COIN_CHANNEL_2.0)
+    - Dual-channel оркестрація та стійкість до збоїв.
+    """
+
+    def test_mobile_channel_happy_path(self):
+        """Happy path: sign.list повертає signSuccess: False, sign.execute повертає signSuccess: True з нагородою."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_happy_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": {
+                    "signQuerySequenceNodeList": [
+                        {
+                            "dailySignNodeList": [
+                                {
+                                    "calendarDayDistance": 0,
+                                    "signResultList": [
+                                        {
+                                            "signSuccess": False,
+                                            "sequenceNumber": 4,
+                                            "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "calendarDayDistance": 1,
+                                    "signResultList": [
+                                        {
+                                            "signSuccess": False,
+                                            "sequenceNumber": 5,
+                                            "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 30}]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        exec_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": {
+                    "signSuccess": True,
+                    "sequenceNumber": 4,
+                    "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                if api == MOBILE_SIGN_LIST_API:
+                    return list_res
+                if api == MOBILE_SIGN_EXECUTE_API:
+                    return exec_res
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["coins"], 25)
+            self.assertEqual(res["streak"], 4)
+
+    def test_mobile_channel_already_done_via_list_query(self):
+        """sign.list повертає signSuccess: True на calendarDayDistance == 0 -> статус ALREADY_DONE, execute НЕ викликається."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_list_done_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": {
+                    "signQuerySequenceNodeList": [
+                        {
+                            "dailySignNodeList": [
+                                {
+                                    "calendarDayDistance": 0,
+                                    "signResultList": [
+                                        {
+                                            "signSuccess": True,
+                                            "sequenceNumber": 4,
+                                            "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "calendarDayDistance": 1,
+                                    "signResultList": [
+                                        {
+                                            "signSuccess": False,
+                                            "sequenceNumber": 5,
+                                            "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 30}]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                if api == MOBILE_SIGN_LIST_API:
+                    return list_res
+                if api == MOBILE_SIGN_EXECUTE_API:
+                    self.fail("MOBILE_SIGN_EXECUTE_API не повинен викликатися, якщо чекін уже виконано за даними списку!")
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["coins"], 25)
+            self.assertEqual(res["streak"], 4)
+            self.assertTrue(is_already_checked_in(list_res))
+            self.assertFalse(is_checkin_success(list_res))
+
+    def test_mobile_channel_already_done_via_execute_today_already_sign(self):
+        """sign.execute повертає todayAlreadySign: True -> статус ALREADY_DONE."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_exec_done_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": {
+                    "signQuerySequenceNodeList": [
+                        {
+                            "dailySignNodeList": [
+                                {
+                                    "calendarDayDistance": 0,
+                                    "signResultList": [
+                                        {
+                                            "signSuccess": False,
+                                            "sequenceNumber": 4,
+                                            "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        exec_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": {
+                    "todayAlreadySign": True,
+                    "sequenceNumber": 4,
+                    "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                if api == MOBILE_SIGN_LIST_API:
+                    return list_res
+                if api == MOBILE_SIGN_EXECUTE_API:
+                    return exec_res
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["coins"], 25)
+            self.assertEqual(res["streak"], 4)
+            self.assertTrue(is_already_checked_in(exec_res))
+            self.assertFalse(is_checkin_success(exec_res))
+
+    def test_dual_channel_pc_already_done_mobile_success(self):
+        """Dual-channel: PC ALREADY_DONE (streak 1, +0) + Mobile SUCCESS (streak 4, +25) -> overall SUCCESS, streak 4, +25 coins."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_done_succ_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 0, "streak": 1}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "SUCCESS", "coins": 25, "streak": 4}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.streak_days, 4)
+            self.assertEqual(mgr.coins_earned, 25)
+
+    def test_dual_channel_pc_success_mobile_success(self):
+        """Dual-channel: PC SUCCESS (streak 1, +20) + Mobile SUCCESS (streak 4, +25) -> overall SUCCESS, streak 4, +45 coins."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_succ_succ_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 20, "streak": 1}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "SUCCESS", "coins": 25, "streak": 4}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.streak_days, 4)
+            self.assertEqual(mgr.coins_earned, 45)
+
+    def test_dual_channel_fallback_when_mobile_returns_captcha_while_pc_succeeded(self):
+        """Dual-channel fallback: Mobile повертає CAPTCHA_REQUIRED, але PC SUCCESS -> загальний статус залишається SUCCESS."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_fallback_cap_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 20, "streak": 2}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "CAPTCHA_REQUIRED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "CAPTCHA_REQUIRED")
+            self.assertEqual(mgr.coins_earned, 20)
+            self.assertEqual(mgr.streak_days, 2)
+
+    def test_dual_channel_fallback_when_mobile_returns_error_while_pc_already_done(self):
+        """Dual-channel fallback: Mobile повертає FAILED, але PC ALREADY_DONE -> загальний статус залишається ALREADY_DONE."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_fallback_err_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 15, "streak": 3}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "FAILED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.mobile_status, "FAILED")
+            self.assertEqual(mgr.coins_earned, 15)
+            self.assertEqual(mgr.streak_days, 3)
+
+    def test_malformed_sign_query_sequence_node_list_empty(self):
+        """Edge case: signQuerySequenceNodeList є порожнім списком."""
+        payload = {"data": {"signQuerySequenceNodeList": []}}
+        today_node, sign_result = _find_mobile_daily_sign_node(payload)
+        self.assertIsNone(today_node)
+        self.assertIsNone(sign_result)
+
+    def test_malformed_missing_sign_result_list(self):
+        """Edge case: у щоденному вузлі відсутній signResultList."""
+        payload = {
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {"calendarDayDistance": 0}
+                        ]
+                    }
+                ]
+            }
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node(payload)
+        self.assertIsNotNone(today_node)
+        self.assertIsNone(sign_result)
+
+    def test_malformed_empty_prize_info_list(self):
+        """Edge case: prizeInfoList є порожнім списком."""
+        node = {
+            "calendarDayDistance": 0,
+            "signResultList": [
+                {
+                    "signSuccess": False,
+                    "sequenceNumber": 2,
+                    "prizeInfoList": []
+                }
+            ]
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node({"data": {"dailySignNodeList": [node]}})
+        self.assertEqual(_extract_prize_coins(sign_result), 0)
+        self.assertEqual(_extract_node_streak(sign_result), 2)
+
+    def test_malformed_missing_calendar_day_distance(self):
+        """Edge case: у щоденному вузлі відсутнє поле calendarDayDistance (fallback на перший вузол)."""
+        node = {
+            "signResultList": [
+                {
+                    "signSuccess": True,
+                    "sequenceNumber": 5,
+                    "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 50}]
+                }
+            ]
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node({"data": {"dailySignNodeList": [node]}})
+        self.assertIsNotNone(today_node)
+        self.assertIsNotNone(sign_result)
+        self.assertTrue(sign_result.get("signSuccess"))
+        self.assertEqual(_extract_prize_coins(sign_result), 50)
+        self.assertEqual(_extract_node_streak(sign_result), 5)
+
+    def test_prepare_mtop_params_for_mobile_endpoints(self):
+        """Параметри MTOP для execute містять playCode, signTimeMills, asac, _lang, _currency; для list — без signTimeMills."""
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+
+        # Execute payload
+        exec_params = mgr._prepare_mtop_params(api=MOBILE_SIGN_EXECUTE_API)
+        self.assertIsNotNone(exec_params)
+        self.assertEqual(exec_params["api"], MOBILE_SIGN_EXECUTE_API)
+        exec_data = json.loads(exec_params["data"])
+        self.assertEqual(exec_data["playCode"], "COIN_CHANNEL_2.0")
+        self.assertIn("signTimeMills", exec_data)
+        self.assertIsInstance(exec_data["signTimeMills"], int)
+        self.assertEqual(exec_data["asac"], "2E2280406IM61M8MG1F2FB")
+        self.assertEqual(exec_params["asac"], "2E2280406IM61M8MG1F2FB")
+        self.assertEqual(exec_data["_lang"], "en_KR")
+        self.assertEqual(exec_data["_currency"], "USD")
+
+        # List payload
+        list_params = mgr._prepare_mtop_params(api=MOBILE_SIGN_LIST_API)
+        self.assertIsNotNone(list_params)
+        self.assertEqual(list_params["api"], MOBILE_SIGN_LIST_API)
+        list_data = json.loads(list_params["data"])
+        self.assertEqual(list_data["playCode"], "COIN_CHANNEL_2.0")
+        self.assertNotIn("signTimeMills", list_data)
+        self.assertEqual(list_data["asac"], "2E2280406IM61M8MG1F2FB")
+        self.assertEqual(list_params["asac"], "2E2280406IM61M8MG1F2FB")
+        self.assertEqual(list_data["_lang"], "en_KR")
+        self.assertEqual(list_data["_currency"], "USD")
+
+    def test_extract_telemetry_with_mobile_sequence_node_list(self):
+        """_extract_telemetry коректно обробляє signQuerySequenceNodeList, sequenceNumber та prizeInfoList."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        payload = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [
+                                    {
+                                        "signSuccess": True,
+                                        "sequenceNumber": 7,
+                                        "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 70}]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        mgr._extract_telemetry(payload, extract_coins=True)
+        self.assertEqual(mgr.streak_days, 7)
+        self.assertEqual(mgr.coins_earned, 70)
+
+    def test_dual_channel_pc_success_mobile_session_expired_does_not_fail(self):
+        """Dual-channel: PC SUCCESS, але Mobile повертає SESSION_EXPIRED -> загальний статус залишається SUCCESS, session_valid=True."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_succ_sess_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 20, "streak": 2}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "SESSION_EXPIRED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "SESSION_EXPIRED")
+            self.assertTrue(mgr.session_valid)
+            self.assertEqual(mgr.coins_earned, 20)
+            self.assertEqual(mgr.streak_days, 2)
+
+    def test_mobile_fallback_when_execute_fails(self):
+        """Mobile channel fallback: execute повертає помилку/None, але допоміжний receive.prize успішний -> SUCCESS."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_fallback_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [
+                                    {"signSuccess": False, "sequenceNumber": 3, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 20}]}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        fallback_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signSuccess": True,
+                "awardCoins": 20,
+                "streak": 3
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                if api == MOBILE_SIGN_LIST_API:
+                    return list_res
+                if api == MOBILE_SIGN_EXECUTE_API:
+                    return None  # Execute fails
+                if api == "mtop.aliexpress.social.interactive.sign.user.receive.prize":
+                    return fallback_res
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["coins"], 20)
+            self.assertEqual(res["streak"], 3)
+
+    def test_find_mobile_daily_sign_node_rejects_non_zero_distance(self):
+        """Вузли з явно ненульовим calendarDayDistance (наприклад, +1 чи -1) НЕ вважаються сьогоднішнім днем."""
+        payload = {
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 1,
+                                "signResultList": [{"signSuccess": False, "sequenceNumber": 5, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 30}]}]
+                            },
+                            {
+                                "calendarDayDistance": 2,
+                                "signResultList": [{"signSuccess": False, "sequenceNumber": 6, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 35}]}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node(payload)
+        self.assertIsNone(today_node, "Вузол з calendarDayDistance=1 не повинен підставлятися як сьогоднішній!")
+        self.assertIsNone(sign_result)
+
+    def test_find_mobile_daily_sign_node_across_multiple_sequences(self):
+        """Пошук вузла поточного дня працює через декілька блоків signQuerySequenceNodeList, навіть якщо перший порожній/минулий."""
+        payload = {
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": []  # Порожній список у першій послідовності
+                    },
+                    {
+                        "dailySignNodeList": [
+                            {"calendarDayDistance": -1, "signResultList": [{"signSuccess": True, "sequenceNumber": 3}]},
+                            {"calendarDayDistance": 0, "signResultList": [{"signSuccess": True, "sequenceNumber": 4, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]}]}
+                        ]
+                    }
+                ]
+            }
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node(payload)
+        self.assertIsNotNone(today_node)
+        self.assertIsNotNone(sign_result)
+        self.assertEqual(today_node.get("calendarDayDistance"), 0)
+        self.assertTrue(sign_result.get("signSuccess"))
+        self.assertEqual(_extract_node_streak(sign_result), 4)
+
+    def test_extract_prize_coins_string_and_formatted_amounts(self):
+        """_extract_prize_coins коректно розпізнає текстові, форматовані з комами та суфіксами кількості монет, ігноруючи bool."""
+        self.assertEqual(_extract_prize_coins({"prizeAmount": "25 coins"}), 25)
+        self.assertEqual(_extract_prize_coins({"prizeAmount": "+30"}), 30)
+        self.assertEqual(_extract_prize_coins({"prizeAmount": "1,500"}), 1500)
+        self.assertEqual(_extract_prize_coins({"prizeAmount": "1 200"}), 1200)
+        self.assertEqual(_extract_prize_coins({"prizeAmount": 50.0}), 50)
+        self.assertEqual(_extract_prize_coins({"coins": True}), 0, "Булевий True не повинен парситися як 1 монета!")
+        self.assertEqual(_extract_prize_coins({"coins": None}), 0)
+
+    def test_sequence_number_on_node_and_prize_on_sign_result(self):
+        """_checkin_mobile_channel коректно витягує стрік і монети, якщо sequenceNumber знаходиться на рівні вузла, а нагорода — у signResultList."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_split_attrs_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "sequenceNumber": 6,  # на рівні вузла
+                                "signResultList": [
+                                    {
+                                        "signSuccess": True,
+                                        "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 35}]  # у signResultList
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        with patch.object(mgr, "_call_mtop", return_value=list_res):
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["streak"], 6)
+            self.assertEqual(res["coins"], 35)
+
+    def test_is_already_checked_in_with_mobile_today_already_sign_even_if_node_false(self):
+        """is_already_checked_in розпізнає todayAlreadySign: True, навіть якщо у вкладеному вузлі signSuccess: False."""
+        payload = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "todayAlreadySign": True,
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [{"signSuccess": False, "sequenceNumber": 4}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        self.assertTrue(is_already_checked_in(payload))
+
+    def test_is_checkin_success_with_mobile_nodes(self):
+        """is_checkin_success розпізнає signSuccess: True на мобільному виконанні, навіть якщо у signQuerySequenceNodeList майбутній день."""
+        payload = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signSuccess": True,
+                "awardCoins": 25,
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 1,
+                                "signResultList": [{"signSuccess": False, "sequenceNumber": 5}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        self.assertTrue(is_checkin_success(payload))
+
+    def test_mobile_channel_malformed_response_handling(self):
+        """_checkin_mobile_channel стійкий до невалідних відповідей: рядок, список, невірні типи тощо."""
+        client = AliClient(cookies={"_m_h5_tk": "tk_malformed_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_call_mtop", return_value="invalid string response"):
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "FAILED")
+            self.assertEqual(res["coins"], 0)
+            self.assertEqual(res["streak"], 0)
+
+    def test_fresh_execution_with_updated_sequence_nodes_is_success(self):
+        """
+        Верифікація свіжого виконання чекіну: MOBILE_SIGN_EXECUTE_API повертає оновлені вузли
+        послідовності з signSuccess: True на сьогоднішньому вузлі (calendarDayDistance == 0).
+        Переконуємося, що статус є SUCCESS (а не помилковий ALREADY_DONE) і нараховуються свіжі монети.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_fresh_nodes_123"})
+        mgr = CheckinManager(client)
+
+        list_res = {
+            "api": MOBILE_SIGN_LIST_API,
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [
+                                    {
+                                        "signSuccess": False,
+                                        "sequenceNumber": 4,
+                                        "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        exec_res = {
+            "api": MOBILE_SIGN_EXECUTE_API,
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [
+                                    {
+                                        "signSuccess": True,
+                                        "sequenceNumber": 4,
+                                        "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        # Перевірка класифікаторів: свіже виконання без штучного верхньорівневого signSuccess не повинно бути ALREADY_DONE
+        self.assertFalse(is_already_checked_in(exec_res), "Свіже виконання з signSuccess: True на сьогоднішньому вузлі не повинно бути ALREADY_DONE!")
+        self.assertTrue(is_checkin_success(exec_res), "Свіже виконання з signSuccess: True на сьогоднішньому вузлі повинно бути SUCCESS!")
+
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                if api == MOBILE_SIGN_LIST_API:
+                    return list_res
+                if api == MOBILE_SIGN_EXECUTE_API:
+                    return exec_res
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["coins"], 25)
+            self.assertEqual(res["streak"], 4)
+
+    def test_dual_channel_pc_already_done_coins_not_added_to_mobile_fresh_success(self):
+        """
+        Верифікація обліку зароблених монет: коли PC є ALREADY_DONE (+15 монет),
+        а Mobile є SUCCESS (+25 монет), self.coins_earned повинно бути строго 25 (НЕ 40!).
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_no_double_counting_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 15, "streak": 2}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "SUCCESS", "coins": 25, "streak": 5}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "ALREADY_DONE")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 25, "Монети від ALREADY_DONE (+15) не повинні додаватися до свіжого SUCCESS (+25)!")
+            self.assertEqual(mgr.streak_days, 5)
+
+    def test_find_mobile_daily_sign_node_fallback_is_today_when_calendar_distance_missing(self):
+        """
+        Верифікація fallback на isToday/today/current: True, коли calendarDayDistance відсутнє в даних.
+        """
+        payload = {
+            "data": {
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "sequenceNumber": 1,
+                                "isToday": False,
+                                "signResultList": [{"signSuccess": True, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 10}]}]
+                            },
+                            {
+                                "sequenceNumber": 2,
+                                "isToday": True,
+                                "signResultList": [{"signSuccess": False, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 20}]}]
+                            },
+                            {
+                                "sequenceNumber": 3,
+                                "isToday": False,
+                                "signResultList": [{"signSuccess": False, "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 30}]}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        today_node, sign_result = _find_mobile_daily_sign_node(payload)
+        self.assertIsNotNone(today_node)
+        self.assertIsNotNone(sign_result)
+        self.assertEqual(today_node.get("sequenceNumber"), 2)
+        self.assertTrue(today_node.get("isToday"))
+        self.assertFalse(sign_result.get("signSuccess"))
+        self.assertEqual(_extract_prize_coins(sign_result), 20)
+
+    def test_mobile_sign_query_list_auxiliary_fallback(self):
+        """
+        Верифікація auxiliary fallback: якщо MOBILE_SIGN_LIST_API повертає None або порожню відповідь,
+        викликається MOBILE_SIGN_QUERY_LIST_API.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_aux_list_123"})
+        mgr = CheckinManager(client)
+
+        query_res = {
+            "api": MOBILE_SIGN_QUERY_LIST_API,
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "dailySignNodeList": [
+                    {
+                        "calendarDayDistance": 0,
+                        "signResultList": [
+                            {
+                                "signSuccess": True,
+                                "sequenceNumber": 6,
+                                "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 35}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        calls = []
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                calls.append(api)
+                if api == MOBILE_SIGN_LIST_API:
+                    return None  # First call returns None / fails
+                if api == MOBILE_SIGN_QUERY_LIST_API:
+                    return query_res
+                return None
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["coins"], 35)
+            self.assertEqual(res["streak"], 6)
+            self.assertIn(MOBILE_SIGN_LIST_API, calls)
+            self.assertIn(MOBILE_SIGN_QUERY_LIST_API, calls)
+
+
+    def test_mobile_execute_today_already_sign_takes_precedence_over_award_coins(self):
+        """
+        Верифікація пріоритету: якщо MOBILE_SIGN_EXECUTE_API повертає todayAlreadySign: True,
+        але водночас містить призові монети (серверна аномалія дубліката),
+        todayAlreadySign має строгий пріоритет: статус ALREADY_DONE, а не SUCCESS.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_already_sign_123"})
+        mgr = CheckinManager(client)
+
+        exec_res = {
+            "api": MOBILE_SIGN_EXECUTE_API,
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "todayAlreadySign": True,
+                "awardCoins": 25,
+                "signQuerySequenceNodeList": [
+                    {
+                        "dailySignNodeList": [
+                            {
+                                "calendarDayDistance": 0,
+                                "signResultList": [
+                                    {
+                                        "signSuccess": True,
+                                        "sequenceNumber": 5,
+                                        "prizeInfoList": [{"prizeType": "coins", "prizeAmount": 25}]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        self.assertTrue(is_already_checked_in(exec_res), "todayAlreadySign: True повинен безумовно класифікуватися як ALREADY_DONE!")
+        self.assertFalse(is_checkin_success(exec_res), "todayAlreadySign: True не повинен бути SUCCESS!")
+
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            mock_call.side_effect = [None, exec_res]
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["coins"], 25)
+            self.assertEqual(res["streak"], 5)
+
+    def test_dual_channel_pc_fresh_success_mobile_already_done_coins_not_mixed(self):
+        """
+        Коли PC є SUCCESS (+20 монет), а Mobile є ALREADY_DONE (+30 монет),
+        загальна сума зароблених монет повинна бути строго 20 (НЕ 50 і НЕ 30!).
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_pc_fresh_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 20, "streak": 3}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "ALREADY_DONE", "coins": 30, "streak": 7}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "ALREADY_DONE")
+            self.assertEqual(mgr.coins_earned, 20, "Монети від ALREADY_DONE (+30) не повинні додаватися до свіжого PC SUCCESS (+20)!")
+            self.assertEqual(mgr.streak_days, 7)
+
+    def test_prepare_mtop_params_mobile_query_list_and_receive_prize(self):
+        """
+        Верифікація використання ASAC_MOBILE_CAMPAIGN для допоміжних ендпоінтів
+        MOBILE_SIGN_QUERY_LIST_API та MOBILE_RECEIVE_PRIZE_API.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_asac_aux_123"})
+        mgr = CheckinManager(client)
+
+        for api in (MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API):
+            params = mgr._prepare_mtop_params(api=api)
+            self.assertIsNotNone(params, f"Параметри для {api} не повинні бути None")
+            self.assertEqual(params["asac"], ASAC_MOBILE_CAMPAIGN, f"Query asac для {api} має бути {ASAC_MOBILE_CAMPAIGN}")
+            data_obj = json.loads(params["data"])
+            self.assertEqual(data_obj["asac"], ASAC_MOBILE_CAMPAIGN, f"Data asac для {api} має бути {ASAC_MOBILE_CAMPAIGN}")
+
+    def test_call_mtop_attaches_api_to_result_if_missing(self):
+        """
+        _call_mtop автоматично додає ключ 'api' у словник результату,
+        якщо шлюз MTOP не повернув його в тілі JSON.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_call_mtop_api_123"})
+        mgr = CheckinManager(client)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ret": ["SUCCESS::ok"], "data": {"signSuccess": True}}
+        mock_resp.text = '{"ret": ["SUCCESS::ok"], "data": {"signSuccess": true}}'
+
+        with patch.object(client, "post", return_value=mock_resp):
+            res = mgr._call_mtop(MOBILE_SIGN_EXECUTE_API)
+            self.assertIsNotNone(res)
+            self.assertIn("api", res)
+            self.assertEqual(res["api"], MOBILE_SIGN_EXECUTE_API)
+
+    def test_mobile_sign_list_failure_does_not_call_query_list_if_session_expired(self):
+        """
+        Якщо MOBILE_SIGN_LIST_API повернув SESSION_EXPIRED, допоміжний запит
+        до MOBILE_SIGN_QUERY_LIST_API не повинен виконуватися даремно.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "tk_dead_session_123"})
+        mgr = CheckinManager(client)
+
+        expired_res = {
+            "api": MOBILE_SIGN_LIST_API,
+            "ret": ["FAIL_SYS_SESSION_EXPIRED::Session expired"],
+            "data": {}
+        }
+
+        calls = []
+        with patch.object(mgr, "_call_mtop") as mock_call:
+            def side_effect(api, data=None):
+                calls.append(api)
+                return expired_res
+            mock_call.side_effect = side_effect
+
+            res = mgr._checkin_mobile_channel()
+            self.assertEqual(res["status"], "SESSION_EXPIRED")
+            self.assertEqual(calls, [MOBILE_SIGN_LIST_API])
+            self.assertNotIn(MOBILE_SIGN_QUERY_LIST_API, calls)
 
 
 if __name__ == "__main__":
