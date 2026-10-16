@@ -598,11 +598,17 @@ class CheckinManager:
                 data_obj = {
                     "playCode": "COIN_CHANNEL_2.0",
                     "asac": asac_val,
+                    "from": "",
                     "_lang": "en_KR",
                     "_currency": "USD"
                 }
             elif api in (MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API) or api in MOBILE_CHECKIN_APIS:
-                data_obj = {"channel": "COIN", "asac": asac_val}
+                data_obj = {
+                    "channel": "COIN",
+                    "asac": asac_val,
+                    "_lang": "en_KR",
+                    "_currency": "USD"
+                }
             else:
                 data_obj = {"asac": asac_val, "_lang": "en_KR", "_currency": "USD"}
             data_str = json.dumps(data_obj, separators=(",", ":"))
