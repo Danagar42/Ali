@@ -112,13 +112,16 @@ def main():
             )
             dispatcher.add_summary(summary)
 
-            # Якщо чекін зараховано/вже був виконаний або зараховані таски перегляду
-            if (checkin_ok or coins_done > 0) and checkin_mgr.session_valid:
+            # Зараховуємо успіх тільки якщо підтверджено чекін (новий або вже виконаний)
+            if checkin_ok and checkin_mgr.session_valid:
                 success_count += 1
-                logger.info(f"✅ [{account_name}] Обробку успішно завершено.")
+                logger.info(f"✅ [{account_name}] Чекін успішно підтверджено.")
             else:
                 failed_count += 1
-                logger.warning(f"⚠️ [{account_name}] Обробку завершено, але жодної активності не підтверджено (перевірте валідність cookies).")
+                if checkin_mgr.status == "CAPTCHA_REQUIRED":
+                    logger.warning(f"⚠️ [{account_name}] Чекін заблоковано капчею WAF (потрібно пройти перевірку в браузері).")
+                else:
+                    logger.warning(f"⚠️ [{account_name}] Чекін не підтверджено (перевірте валідність cookies або наявність капчі).")
         except Exception as e:
             failed_count += 1
             dispatcher.add_summary(AccountSummary(

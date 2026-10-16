@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from src.client import AliClient
 
 logger = logging.getLogger(__name__)
@@ -52,10 +52,16 @@ class CouponCollector:
     Керує пошуком та збором доступних купонів платформи та магазинів.
     Знаходить актуальні activityId/couponId та надсилає валідні запити з обробкою відповідей.
     """
+    _dead_endpoints: Set[str] = set()
+
     def __init__(self, client: AliClient):
         self.client = client
         self.account_name = client.account_name
-        self._dead_endpoints = set()
+
+    @classmethod
+    def reset_dead_endpoints(cls):
+        """Очищує кеш неактивних ендпоінтів (для ізоляції тестів)."""
+        cls._dead_endpoints.clear()
 
     def _extract_coupon_candidates(self, html_content: str) -> List[Dict[str, str]]:
         """
@@ -77,31 +83,50 @@ class CouponCollector:
 
         return candidates
 
-    def collect_available_coupons(self):
+    def collect_available_coupons(self) -> int:
         """
         Відвідує Coupon Center та відправляє запити на збір знайдених або промо-купонів.
         """
         logger.info(f"[{self.account_name}] 🎟️ Перевірка доступних купонів у Coupon Center...")
-        resp = self.client.get(COUPON_CENTER_URL)
+
+        # Якщо обидва центри купонів уже визнані неактивними, одразу пропускаємо без затримок
+        if COUPON_CENTER_URL in self._dead_endpoints and COUPON_CENTER_BACKUP_URL in self._dead_endpoints:
+            logger.debug(f"[{self.account_name}] Coupon Center позначено як неактивний, пропускаємо.")
+            return 0
+
+        resp = None
+        if COUPON_CENTER_URL not in self._dead_endpoints:
+            resp = self.client.get(COUPON_CENTER_URL)
+            if not resp or resp.status_code != 200:
+                if resp is None or resp.status_code in (404, 410, 500, 502, 503, 504):
+                    self._dead_endpoints.add(COUPON_CENTER_URL)
+
         if not resp or resp.status_code != 200:
-            logger.debug(f"[{self.account_name}] Перехід на резервний Coupon Center...")
-            resp = self.client.get(COUPON_CENTER_BACKUP_URL)
+            if COUPON_CENTER_BACKUP_URL not in self._dead_endpoints:
+                logger.debug(f"[{self.account_name}] Перехід на резервний Coupon Center...")
+                resp = self.client.get(COUPON_CENTER_BACKUP_URL)
+                if not resp or resp.status_code != 200:
+                    if resp is None or resp.status_code in (404, 410, 500, 502, 503, 504):
+                        self._dead_endpoints.add(COUPON_CENTER_BACKUP_URL)
 
-        candidates: List[Dict[str, str]] = []
-
-        if resp and resp.status_code == 200:
-            logger.info(f"[{self.account_name}] Успішно відвідано Coupon Center.")
-            candidates = self._extract_coupon_candidates(resp.text)
-            if candidates:
-                logger.info(f"[{self.account_name}] Знайдено купонних кампаній у розмітці: {len(candidates)}")
-        else:
+        if not resp or resp.status_code != 200:
             status = resp.status_code if resp else "None"
-            logger.warning(f"[{self.account_name}] Coupon Center повернув статус: {status}")
+            logger.warning(f"[{self.account_name}] Coupon Center повернув статус: {status}. Пропускаємо збір купонів.")
+            return 0
+
+        logger.info(f"[{self.account_name}] Успішно відвідано Coupon Center.")
+        candidates = self._extract_coupon_candidates(resp.text)
+        if candidates:
+            logger.info(f"[{self.account_name}] Знайдено купонних кампаній у розмітці: {len(candidates)}")
 
         claim_endpoints = [
             "https://campaign.aliexpress.com/coupon/claim",
             "https://coupon.aliexpress.com/buyer/coupon/applyCoupon.htm"
         ]
+
+        if all(u in self._dead_endpoints for u in claim_endpoints):
+            logger.debug(f"[{self.account_name}] Усі ендпоінти збору купонів неактивні, пропускаємо спроби.")
+            return 0
 
         # Якщо специфічні кандидати не знайдені в HTML, використовуємо стандартні слоти промо-центру
         if not candidates:
@@ -112,6 +137,9 @@ class CouponCollector:
 
         claimed_count = 0
         for item in candidates[:5]:  # обмежуємо до 5 спроб, щоб не флудити
+            if all(u in self._dead_endpoints for u in claim_endpoints):
+                break
+
             act_id = item.get("activityId") or item.get("couponId", "")
             payload: Dict[str, Any] = {
                 "channel": "web_coupon_center",
@@ -128,7 +156,7 @@ class CouponCollector:
                 try:
                     res = self.client.post(url, json=payload)
                     if not res or res.status_code != 200:
-                        if res and res.status_code in (404, 500, 502, 503):
+                        if res is None or res.status_code in (404, 410, 500, 502, 503, 504):
                             self._dead_endpoints.add(url)
                         continue
 

@@ -1,5 +1,6 @@
 import os
 import sys
+import html
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 class AccountSummary:
     """Підсумкові дані обробки одного акаунта."""
     name: str
-    checkin_status: str  # "SUCCESS", "ALREADY_DONE", "FAILED", "SESSION_EXPIRED"
+    checkin_status: str  # "SUCCESS", "ALREADY_DONE", "CAPTCHA_REQUIRED", "FAILED", "SESSION_EXPIRED"
     coins_earned: int = 0
     streak_days: int = 0
     total_coins: Optional[int] = None
@@ -42,6 +43,8 @@ class NotificationDispatcher:
             return "✅ Зараховано"
         if status == "ALREADY_DONE":
             return "ℹ️ Вже був"
+        if status == "CAPTCHA_REQUIRED":
+            return "🧩 Капча"
         if status == "SESSION_EXPIRED":
             return "❌ Прострочено"
         return "⚠️ Збій"
@@ -61,16 +64,24 @@ class NotificationDispatcher:
         total_accounts = len(self.summaries)
         successful_accounts = sum(
             1 for s in self.summaries
-            if (s.checkin_status in ("SUCCESS", "ALREADY_DONE") or s.tasks_done > 0) and s.session_valid
+            if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid
         )
         total_coins_earned = sum(s.coins_earned for s in self.summaries)
         total_coupons = sum(s.coupons_claimed for s in self.summaries)
         has_expired = any(not s.session_valid or s.checkin_status == "SESSION_EXPIRED" for s in self.summaries)
+        has_captcha = any(s.checkin_status == "CAPTCHA_REQUIRED" for s in self.summaries)
+
+        status_text = (
+            '🟢 Успішно' if successful_accounts == total_accounts and total_accounts > 0
+            else ('🔴 Потрібна увага' if has_expired
+            else ('🧩 Капча' if has_captcha
+            else '🟡 Частково'))
+        )
 
         lines = [
             "# 🪙 AliExpress Farm Summary Report",
             "",
-            f"> **Статус обробки:** {'🟢 Успішно' if successful_accounts == total_accounts and total_accounts > 0 else ('🔴 Потрібна увага' if has_expired else '🟡 Частково')} | "
+            f"> **Статус обробки:** {status_text} | "
             f"**Акаунтів:** {successful_accounts}/{total_accounts} | "
             f"**Зароблено монет сьогодні:** +{total_coins_earned} 🪙 | "
             f"**Купонів зібрано:** {total_coupons} 🎟️",
@@ -81,6 +92,13 @@ class NotificationDispatcher:
             lines.extend([
                 "> [!CRITICAL]",
                 "> Виявлено акаунти з недійсною або простроченою сесією! Необхідно оновити секрети в репозиторії, щоб уникнути втрати щоденного стріку.",
+                ""
+            ])
+        if has_captcha:
+            lines.extend([
+                "> [!WARNING]",
+                "> 🧩 **Виявлено захист від роботів (Alibaba WAF Captcha)!**",
+                "> Необхідно відкрити сайт AliExpress у звичайному браузері з тієї ж IP/проксі та пройти перевірку слайдера для зняття блокування.",
                 ""
             ])
 
@@ -97,8 +115,9 @@ class NotificationDispatcher:
             total_str = f"{s.total_coins:,} 🪙" if s.total_coins is not None else "-"
             tasks_str = f"{s.tasks_done}"
             coupons_str = f"{s.coupons_claimed}"
+            safe_name = html.escape(str(s.name or "Account")).replace("|", "\\|")
             lines.append(
-                f"| **{s.name}** | {self._checkin_icon(s.checkin_status)} | {streak_str} | {earned_str} | {total_str} | {tasks_str} | {coupons_str} | {self._session_icon(s.session_valid)} |"
+                f"| **{safe_name}** | {self._checkin_icon(s.checkin_status)} | {streak_str} | {earned_str} | {total_str} | {tasks_str} | {coupons_str} | {self._session_icon(s.session_valid)} |"
             )
 
         lines.append("")
@@ -124,12 +143,18 @@ class NotificationDispatcher:
         total_accounts = len(self.summaries)
         successful_accounts = sum(
             1 for s in self.summaries
-            if (s.checkin_status in ("SUCCESS", "ALREADY_DONE") or s.tasks_done > 0) and s.session_valid
+            if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid
         )
         total_coins = sum(s.coins_earned for s in self.summaries)
         has_expired = any(not s.session_valid or s.checkin_status == "SESSION_EXPIRED" for s in self.summaries)
+        has_captcha = any(s.checkin_status == "CAPTCHA_REQUIRED" for s in self.summaries)
 
-        status_header = "🚨 <b>AliExpress Farmer: Потрібна увага!</b>" if has_expired else "🚀 <b>AliExpress Daily Farm: Звіт</b>"
+        if has_expired:
+            status_header = "🚨 <b>AliExpress Farmer: Потрібна увага!</b>"
+        elif has_captcha:
+            status_header = "🧩 <b>AliExpress Farmer: Потрібна капча!</b>"
+        else:
+            status_header = "🚀 <b>AliExpress Daily Farm: Звіт</b>"
 
         msg_lines = [
             status_header,
@@ -139,7 +164,14 @@ class NotificationDispatcher:
         ]
 
         for s in self.summaries:
-            status_badge = "✅" if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid else "❌"
+            if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid:
+                status_badge = "✅"
+            elif s.checkin_status == "CAPTCHA_REQUIRED":
+                status_badge = "🧩"
+            else:
+                status_badge = "❌"
+
+            safe_name = html.escape(str(s.name or "Account"))
             detail = f"{self._checkin_icon(s.checkin_status)}"
             if s.streak_days > 0:
                 detail += f", стрік {s.streak_days} дн."
@@ -147,13 +179,20 @@ class NotificationDispatcher:
                 detail += f", +{s.coins_earned} монет"
             if not s.session_valid:
                 detail += " (СЕСІЯ ПРОСТРОЧЕНА!)"
+            if s.error_message:
+                detail += f" ({s.error_message})"
 
-            msg_lines.append(f"{status_badge} <b>{s.name}</b>: {detail}")
+            msg_lines.append(f"{status_badge} <b>{safe_name}</b>: {html.escape(detail)}")
 
         if has_expired:
             msg_lines.extend([
                 "",
                 "⚠️ <i>Будь ласка, оновіть cookies у GitHub Secrets, щоб не втратити стрік щоденних нагород!</i>"
+            ])
+        if has_captcha:
+            msg_lines.extend([
+                "",
+                "🧩 <i>Виявлено захист Alibaba WAF! Відкрийте AliExpress у браузері та пройдіть слайдер перевірки.</i>"
             ])
 
         text = "\n".join(msg_lines)

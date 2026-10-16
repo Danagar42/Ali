@@ -1,6 +1,6 @@
 import logging
 import random
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from src.client import AliClient
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,12 @@ BROWSE_TARGETS = [
     "https://www.aliexpress.com/category/1509/jewelry-accessories.html",
     "https://www.aliexpress.com/p/coin-pc-index/index.html",
 ]
+
+REPORT_TASK_URLS = [
+    "https://coins.aliexpress.com/api/finishTask",
+    "https://coins.aliexpress.com/api/task/finish"
+]
+
 
 def _is_task_already_done(data: Any) -> bool:
     if not data:
@@ -64,10 +70,16 @@ class CoinsFarmManager:
     Керує фармом монет: перегляд товарів, виконання активностей росту,
     отримання завдань та відправка підтверджень із валідними ідентифікаторами.
     """
+    _dead_urls: Set[str] = set()
+
     def __init__(self, client: AliClient):
         self.client = client
         self.account_name = client.account_name
-        self._dead_urls = set()
+
+    @classmethod
+    def reset_dead_urls(cls):
+        """Очищує кеш неактивних URL (для ізоляції тестів)."""
+        cls._dead_urls.clear()
 
     def fetch_active_tasks(self) -> List[Dict[str, Any]]:
         """
@@ -77,13 +89,18 @@ class CoinsFarmManager:
             "https://coins.aliexpress.com/api/tasks",
             "https://coins.aliexpress.com/api/task/list"
         ]
+        # Якщо всі URL завдань уже відомі як мертві, одразу повертаємо порожній список без затримок
+        if all(query_url in self._dead_urls for query_url in task_query_urls):
+            logger.debug(f"[{self.account_name}] Усі ендпоінти списку завдань неактивні, пропускаємо.")
+            return []
+
         for query_url in task_query_urls:
             if query_url in self._dead_urls:
                 continue
             try:
                 resp = self.client.get(query_url, params={"channel": "COIN"})
                 if not resp or resp.status_code != 200:
-                    if resp and resp.status_code in (404, 500, 502, 503):
+                    if resp is None or resp.status_code in (404, 405, 410, 500, 502, 503, 504):
                         self._dead_urls.add(query_url)
                     continue
                 content_type = resp.headers.get("content-type", "").lower()
@@ -112,6 +129,10 @@ class CoinsFarmManager:
         Імітує перегляд сторінок товарів/категорій для отримання бонусів перегляду.
         Повертає кількість успішно завершених або раніше виконаних завдань.
         """
+        if all(u in self._dead_urls for u in REPORT_TASK_URLS):
+            logger.debug(f"[{self.account_name}] Усі ендпоінти завершення завдань неактивні, пропускаємо перегляд сторінок.")
+            return 0
+
         logger.info(f"[{self.account_name}] 🛍️ Початок виконання завдань з перегляду (к-ть: {count})...")
         active_tasks = self.fetch_active_tasks()
         browse_task_ids = [
@@ -123,12 +144,14 @@ class CoinsFarmManager:
         completed_or_acknowledged = 0
 
         for idx, url in enumerate(targets, 1):
+            if all(u in self._dead_urls for u in REPORT_TASK_URLS):
+                logger.debug(f"[{self.account_name}] Усі ендпоінти завершення завдань стали неактивними, зупиняємо перегляд сторінок.")
+                break
+
             logger.info(f"[{self.account_name}] [{idx}/{len(targets)}] Перегляд: {url}")
             resp = self.client.get(url)
-            page_ok = False
             if resp and resp.status_code == 200:
                 logger.debug(f"[{self.account_name}] Сторінку успішно відвідано.")
-                page_ok = True
             else:
                 status = resp.status_code if resp else "Error"
                 logger.warning(f"[{self.account_name}] Не вдалося завантажити {url} (статус: {status})")
@@ -142,8 +165,6 @@ class CoinsFarmManager:
             )
             if reported:
                 completed_or_acknowledged += 1
-            elif page_ok:
-                completed_or_acknowledged += 1
 
         return completed_or_acknowledged
 
@@ -156,10 +177,12 @@ class CoinsFarmManager:
         """
         Відправляє подію виконання завдання на бекенд AliExpress із детальним логуванням відповіді.
         """
-        report_urls = [
-            "https://coins.aliexpress.com/api/finishTask",
-            "https://coins.aliexpress.com/api/task/finish"
-        ]
+        report_urls = REPORT_TASK_URLS
+
+        # Якщо всі URL репорту вже відомі як неактивні, повертаємо False одразу без затримок
+        if all(u in self._dead_urls for u in report_urls):
+            logger.debug(f"[{self.account_name}] Усі ендпоінти репорту неактивні, пропускаємо.")
+            return False
 
         payload: Dict[str, Any] = {
             "taskType": task_type,
@@ -176,7 +199,7 @@ class CoinsFarmManager:
             try:
                 resp = self.client.post(url, json=payload)
                 if not resp or resp.status_code != 200:
-                    if resp and resp.status_code in (404, 500, 502, 503):
+                    if resp is None or resp.status_code in (404, 405, 410, 500, 502, 503, 504):
                         self._dead_urls.add(url)
                     continue
 

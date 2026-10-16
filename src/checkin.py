@@ -22,25 +22,131 @@ def generate_mtop_sign(token: str, t: str, app_key: str, data: str) -> str:
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _normalize_res(res_data: Any):
+    """
+    Нормалізує об'єкт відповіді (requests.Response, dict, str тощо) без ризику TypeError або
+    хибного короткого замикання bool(Response) на статус-кодах 4xx/5xx.
+    Повертає кортеж (текстовий_контент, словник_json_або_None).
+    """
+    if res_data is None:
+        return "", None
+
+    # Обробка об'єктів requests.Response (або duck-typed об'єктів)
+    if hasattr(res_data, "text") or hasattr(res_data, "status_code"):
+        parts = []
+        try:
+            parts.append(str(getattr(res_data, "text", "")))
+        except Exception:
+            pass
+        try:
+            url_val = str(getattr(res_data, "url", ""))
+            if url_val:
+                parts.append(url_val)
+        except Exception:
+            pass
+        try:
+            headers_val = str(getattr(res_data, "headers", ""))
+            if headers_val:
+                parts.append(headers_val)
+        except Exception:
+            pass
+
+        full_text = " ".join(parts)
+        json_obj = None
+        if hasattr(res_data, "json"):
+            try:
+                parsed = res_data.json()
+                if isinstance(parsed, dict):
+                    json_obj = parsed
+            except Exception:
+                pass
+        return full_text, json_obj
+
+    if isinstance(res_data, dict):
+        return str(res_data), res_data
+
+    if isinstance(res_data, str):
+        json_obj = None
+        try:
+            parsed = json.loads(res_data)
+            if isinstance(parsed, dict):
+                json_obj = parsed
+        except Exception:
+            pass
+        return res_data, json_obj
+
+    return str(res_data), None
+
+
+def is_captcha_required(res_data: Any) -> bool:
+    """
+    Визначає, чи вимагає Alibaba WAF проходження верифікації (слайдер капчі).
+    Сигнатури:
+    - RGV587_RUN_SCRIPT: стандартний скрипт захисту Alibaba WAF
+    - FAIL_SYS_USER_VALIDATE: MTOP код необхідності валідації користувача
+    - _____tmd_____/punish: шлях редиректу на сторінку покарання / розгадування слайдера
+    """
+    if res_data is None:
+        return False
+    text, json_data = _normalize_res(res_data)
+    if not text and not json_data:
+        return False
+
+    text_lower = text.lower()
+    indicators = [
+        "rgv587_run_script",
+        "rgv587",
+        "fail_sys_user_validate",
+        "_____tmd_____/punish",
+        "punish?x="
+    ]
+    if any(ind in text_lower for ind in indicators):
+        return True
+
+    if json_data:
+        ret = json_data.get("ret")
+        if isinstance(ret, list):
+            for r in ret:
+                r_lower = str(r).lower()
+                if any(ind in r_lower for ind in indicators):
+                    return True
+        data_block = json_data.get("data")
+        if isinstance(data_block, dict):
+            url_field = str(data_block.get("url", "")).lower()
+            if "_____tmd_____/punish" in url_field or "rgv587" in url_field:
+                return True
+
+    return False
+
+
 def is_already_checked_in(res_data: Any) -> bool:
     """
     Визначає, чи було чекін уже зараховано раніше сьогодні.
     """
-    if not res_data:
+    if res_data is None:
         return False
-    if isinstance(res_data, dict):
-        if is_mtop_token_expired(res_data) or is_session_expired(res_data):
-            return False
+    if is_captcha_required(res_data) or is_mtop_token_expired(res_data) or is_session_expired(res_data):
+        return False
 
-        data_block = res_data.get("data")
+    text, json_data = _normalize_res(res_data)
+    if not text and not json_data:
+        return False
+
+    if json_data:
+        data_block = json_data.get("data")
         if isinstance(data_block, dict):
             inner = data_block.get("data")
-            if isinstance(inner, dict) and inner.get("signToday") is True:
-                return True
+            if isinstance(inner, dict):
+                if inner.get("signToday") is False:
+                    return False
+                if inner.get("signToday") is True:
+                    return True
+            if data_block.get("signToday") is False:
+                return False
             if data_block.get("signToday") is True:
                 return True
 
-        ret = res_data.get("ret")
+        ret = json_data.get("ret")
         if isinstance(ret, list):
             for r in ret:
                 r_lower = str(r).lower()
@@ -50,11 +156,11 @@ def is_already_checked_in(res_data: Any) -> bool:
                 ]):
                     return True
 
-    text = str(res_data).lower()
+    text_lower = text.lower()
     # Запобігаємо хибному спрацьовуванню на помилки типу "Token already expired" або "Please repeat later"
-    if "token" in text and "expired" in text:
+    if "token" in text_lower and "expired" in text_lower:
         return False
-    if "repeat later" in text or "flow_limit" in text or "rate limit" in text:
+    if "repeat later" in text_lower or "flow_limit" in text_lower or "rate limit" in text_lower:
         return False
 
     indicators = [
@@ -64,7 +170,7 @@ def is_already_checked_in(res_data: Any) -> bool:
         "has signed today", "already checked",
         'signtoday": true', 'signtoday":true'
     ]
-    return any(ind in text for ind in indicators)
+    return any(ind in text_lower for ind in indicators)
 
 
 def is_mtop_token_expired(res_data: Any) -> bool:
@@ -72,47 +178,58 @@ def is_mtop_token_expired(res_data: Any) -> bool:
     Визначає, чи повернув MTOP шлюз помилку застарілого/порожнього H5 токена.
     Це не означає прострочення сесії акаунта, а лише потребує отримання нового _m_h5_tk та повторного підпису.
     """
-    if not res_data:
+    if res_data is None:
         return False
-    text = str(res_data).lower()
+    text, _ = _normalize_res(res_data)
+    if not text:
+        return False
+    text_lower = text.lower()
     indicators = [
         "fail_sys_token_expired", "token_expired", "token_invalid", "token expired",
         "fail_sys_token_empty", "token_empty"
     ]
-    return any(ind in text for ind in indicators)
+    return any(ind in text_lower for ind in indicators)
 
 
 def is_session_expired(res_data: Any) -> bool:
     """
     Визначає, чи є сесія акаунта неавторизованою або простроченою (потребує оновлення cookies / повторного логіну).
-    Примітка: MTOP FAIL_SYS_TOKEN_EXPIRED не входить сюди, оскільки токен шлюзу оновлюється автоматично.
+    Примітка: MTOP FAIL_SYS_TOKEN_EXPIRED та капча WAF не входять сюди.
     """
-    if not res_data:
+    if res_data is None:
         return False
-    if is_mtop_token_expired(res_data):
+    if is_captcha_required(res_data) or is_mtop_token_expired(res_data):
         return False
 
-    text = str(res_data).lower()
+    text, _ = _normalize_res(res_data)
+    if not text:
+        return False
+    text_lower = text.lower()
     indicators = [
         "not_login", "need_login", "session_expired", "illegal_access",
         "login_required", "fail_sys_user_not_login", "user_not_login",
         "fail_sys_session_expired", "session_timeout",
         "login.aliexpress.com", "passport.aliexpress.com"
     ]
-    return any(ind in text for ind in indicators)
+    return any(ind in text_lower for ind in indicators)
 
 
 def is_checkin_success(res_data: Any) -> bool:
     """
-    Безпечно перевіряє успішність виконання нового чекіну в JSON-відповіді.
+    Безпечно перевіряє успішність виконання нового чекіну в JSON-відповіді або Response.
     Запобігає IndexError, TypeError та хибним спрацьовуванням від шлюзів MTOP при бізнес-помилках.
     """
-    if not isinstance(res_data, dict):
+    if res_data is None:
+        return False
+    _, json_data = _normalize_res(res_data)
+    if not isinstance(json_data, dict):
         return False
 
-    # Повторний чекін, застарілий токен MTOP або прострочена сесія не є новим успішним чекіном
-    if is_already_checked_in(res_data) or is_session_expired(res_data) or is_mtop_token_expired(res_data):
+    # Капча, повторний чекін, застарілий токен MTOP або прострочена сесія не є новим успішним чекіном
+    if is_captcha_required(res_data) or is_already_checked_in(res_data) or is_session_expired(res_data) or is_mtop_token_expired(res_data):
         return False
+
+    res_data = json_data
 
     # Перевірка на явний прапорець невдачі
     if res_data.get("success") is False:
@@ -274,6 +391,11 @@ class CheckinManager:
                     data={"data": data_str},
                     headers=headers
                 )
+                if resp is not None and is_captcha_required(resp):
+                    self.status = "CAPTCHA_REQUIRED"
+                    logger.warning(f"[{self.account_name}] 🧩 Виявлено вимогу проходження капчі (WAF) у тексті відповіді!")
+                    return None
+
                 if not resp or resp.status_code != 200:
                     status = resp.status_code if resp else "None"
                     body = resp.text[:120] if resp else ""
@@ -282,6 +404,11 @@ class CheckinManager:
 
                 res_data = resp.json()
                 logger.info(f"[{self.account_name}] Відповідь від {url}: {res_data}")
+
+                if is_captcha_required(res_data):
+                    self.status = "CAPTCHA_REQUIRED"
+                    logger.warning(f"[{self.account_name}] 🧩 Виявлено вимогу проходження капчі (WAF) у JSON відповіді!")
+                    return res_data
 
                 if is_mtop_token_expired(res_data) and attempt < max_retries - 1:
                     logger.info(f"[{self.account_name}] 🔄 Отримано FAIL_SYS_TOKEN_EXPIRED для {api}. Оновлюємо токен та повторюємо спробу...")
@@ -341,16 +468,124 @@ class CheckinManager:
 
         return False
 
-    def _extract_telemetry(self, res_data: Dict[str, Any]):
+    def _extract_coins_from_sign_list(self, res_data: Any):
+        """Витягує зароблені монети із signList відповідно до поточного стріку."""
+        if res_data is None or self.streak_days <= 0:
+            return
+        if not isinstance(res_data, dict):
+            _, res_data = _normalize_res(res_data)
+            if not isinstance(res_data, dict):
+                return
+
+        data_block = res_data.get("data")
+        target_dict = data_block if isinstance(data_block, dict) else res_data
+        inner_dict = target_dict.get("data") if isinstance(target_dict, dict) and isinstance(target_dict.get("data"), dict) else {}
+
+        day_keys = ["days", "day", "dayNum", "signDays", "continuousCheckinDays", "streak", "index"]
+        coin_keys = ["coins", "coin", "awardCoins", "coinCount", "points", "awardPoints", "rewardCoins", "amount"]
+
+        for d in (inner_dict, target_dict, res_data):
+            sign_list = d.get("signList")
+            if isinstance(sign_list, list) and len(sign_list) > 0:
+                parsed_items = []
+                today_coins = None
+
+                for item in sign_list:
+                    if not isinstance(item, dict):
+                        continue
+
+                    # Кількість монет
+                    item_coins = None
+                    for ck in coin_keys:
+                        val = item.get(ck)
+                        if val is not None and isinstance(val, (int, str, float)):
+                            try:
+                                c = int(float(str(val).replace(",", "").strip()))
+                                if c > 0:
+                                    item_coins = c
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+                    if item_coins is None:
+                        continue
+
+                    # Маркер сьогоднішнього дня
+                    if any(item.get(k) is True for k in ("isToday", "today", "current", "signToday")):
+                        today_coins = item_coins
+
+                    # Номер дня
+                    day_num = None
+                    for dk in day_keys:
+                        val = item.get(dk)
+                        if val is not None and isinstance(val, (int, str, float)):
+                            try:
+                                day_num = int(float(str(val).replace(",", "").strip()))
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+                    parsed_items.append((day_num, item_coins))
+
+                # 1. Точне співпадіння за номером дня (1-based: day == streak_days)
+                for day_num, coins in parsed_items:
+                    if day_num == self.streak_days:
+                        self.coins_earned = coins
+                        return
+
+                # 2. Якщо стрік перевищує довжину циклу календаря (наприклад, день 8 у 7-денному циклі)
+                cycle_day = ((self.streak_days - 1) % len(sign_list)) + 1
+                for day_num, coins in parsed_items:
+                    if day_num == cycle_day:
+                        self.coins_earned = coins
+                        return
+
+                # 3. 0-індексовані дні (дні від 0 до N-1)
+                for day_num, coins in parsed_items:
+                    if day_num is not None and (day_num == self.streak_days - 1 or day_num == cycle_day - 1):
+                        self.coins_earned = coins
+                        return
+
+                # 4. Якщо номер дня не збігся, але є елемент з позначкою сьогодні
+                if today_coins is not None:
+                    self.coins_earned = today_coins
+                    return
+
+    def _has_explicit_streak_days(self, res_data: Any) -> bool:
+        """Перевіряє, чи містить відповідь явне значення стріку (signDays/streak тощо)."""
+        if not isinstance(res_data, dict):
+            _, res_data = _normalize_res(res_data)
+            if not isinstance(res_data, dict):
+                return False
+        data_block = res_data.get("data")
+        target_dict = data_block if isinstance(data_block, dict) else res_data
+        inner_dict = target_dict.get("data") if isinstance(target_dict, dict) and isinstance(target_dict.get("data"), dict) else {}
+
+        for d in (inner_dict, target_dict, res_data):
+            if isinstance(d, dict):
+                for key in ["continuousCheckinDays", "continuousDays", "signDays", "streak", "dayNum"]:
+                    val = d.get(key)
+                    if val is not None and isinstance(val, (int, str, float)):
+                        try:
+                            if int(float(str(val).replace(",", "").strip())) > 0:
+                                return True
+                        except (ValueError, TypeError):
+                            pass
+        return False
+
+    def _extract_telemetry(self, res_data: Dict[str, Any], extract_coins: bool = True):
         """Витягує дані про дні стріку та нагородні монети із відповіді сервера."""
         if not isinstance(res_data, dict):
-            return
+            _, res_data = _normalize_res(res_data)
+            if not isinstance(res_data, dict):
+                return
 
         data_block = res_data.get("data")
         target_dict = data_block if isinstance(data_block, dict) else res_data
         inner_dict = target_dict.get("data") if isinstance(target_dict, dict) and isinstance(target_dict.get("data"), dict) else {}
 
         # Дні стріку
+        extracted_days = None
         for d in (inner_dict, target_dict, res_data):
             for key in ["continuousCheckinDays", "continuousDays", "signDays", "streak", "dayNum"]:
                 val = d.get(key)
@@ -358,36 +593,37 @@ class CheckinManager:
                     try:
                         days = int(float(str(val).replace(",", "").strip()))
                         if days > 0:
-                            self.streak_days = max(self.streak_days, days)
+                            extracted_days = days if extracted_days is None else max(extracted_days, days)
                     except (ValueError, TypeError):
                         pass
 
-        # Зароблені монети
-        for d in (inner_dict, target_dict, res_data):
-            for key in ["awardCoins", "coinCount", "points", "awardPoints", "coin", "coins"]:
-                val = d.get(key)
-                if val is not None and isinstance(val, (int, str, float)):
-                    try:
-                        coins = int(float(str(val).replace(",", "").strip()))
-                        if coins > 0:
-                            self.coins_earned = coins
-                    except (ValueError, TypeError):
-                        pass
+        if extracted_days is not None:
+            self.streak_days = extracted_days
 
-        # Якщо coins_earned ще 0, перевіряємо signList за номером стріку
-        if self.coins_earned == 0:
+        # Якщо signToday явним чином False, це відповідь до чекіну, і монети є вчорашніми нагородами — їх не можна зараховувати!
+        has_sign_today_false = any(
+            isinstance(d, dict) and d.get("signToday") is False
+            for d in (inner_dict, target_dict, res_data)
+        )
+        if has_sign_today_false:
+            extract_coins = False
+
+        # Зароблені монети (екстрагуються лише за підтвердженого успіху чекіну або signToday == True)
+        if extract_coins:
             for d in (inner_dict, target_dict, res_data):
-                sign_list = d.get("signList")
-                if isinstance(sign_list, list) and self.streak_days > 0:
-                    for item in sign_list:
-                        if isinstance(item, dict):
-                            day_num = item.get("days") or item.get("day")
-                            if day_num == self.streak_days and item.get("coins"):
-                                try:
-                                    self.coins_earned = int(float(str(item["coins"]).replace(",", "").strip()))
-                                    break
-                                except (ValueError, TypeError):
-                                    pass
+                for key in ["awardCoins", "coinCount", "points", "awardPoints", "coin", "coins"]:
+                    val = d.get(key)
+                    if val is not None and isinstance(val, (int, str, float)):
+                        try:
+                            coins = int(float(str(val).replace(",", "").strip()))
+                            if coins > 0:
+                                self.coins_earned = coins
+                        except (ValueError, TypeError):
+                            pass
+
+            # Якщо coins_earned ще 0, перевіряємо signList за номером стріку
+            if self.coins_earned == 0:
+                self._extract_coins_from_sign_list(res_data)
 
         # Загальний баланс
         for d in (inner_dict, target_dict, res_data):
@@ -411,6 +647,10 @@ class CheckinManager:
         # 1. Початковий візит до сторінки PC Index для ініціалізації сесії
         try:
             home_resp = self.client.get(COIN_PC_REFERER)
+            if home_resp and is_captcha_required(home_resp):
+                self.status = "CAPTCHA_REQUIRED"
+                logger.warning(f"[{self.account_name}] 🧩 Сторінка PC Index вимагає капчі WAF!")
+                return False
             if home_resp and home_resp.status_code == 200:
                 if self._parse_coin_page_html(home_resp.text):
                     self.status = "ALREADY_DONE"
@@ -426,8 +666,16 @@ class CheckinManager:
         sign_payload = {"asac": ASAC_CAMPAIGN, "_lang": "en_KR", "_currency": "USD"}
         status_res = self._call_mtop("mtop.aliexpress.coin.pc.sign.list", data=sign_payload)
 
+        if self.status == "CAPTCHA_REQUIRED":
+            return False
+
         sign_today = None
         if status_res:
+            if is_captcha_required(status_res):
+                self.status = "CAPTCHA_REQUIRED"
+                logger.warning(f"[{self.account_name}] 🧩 Статус чекіну повернув вимогу капчі (WAF)!")
+                return False
+
             if is_session_expired(status_res):
                 self.session_valid = False
                 self.status = "SESSION_EXPIRED"
@@ -446,41 +694,63 @@ class CheckinManager:
                 sign_days = data_block.get("signDays")
             if sign_days is not None:
                 try:
-                    self.streak_days = max(self.streak_days, int(float(str(sign_days).replace(",", "").strip())))
+                    self.streak_days = int(float(str(sign_days).replace(",", "").strip()))
                 except (ValueError, TypeError):
                     pass
 
-            self._extract_telemetry(status_res)
+            is_already_done = sign_today is True or is_already_checked_in(status_res)
+            self._extract_telemetry(status_res, extract_coins=is_already_done)
 
         # 3. Якщо вже зараховано сьогодні
         if sign_today is True or (status_res and is_already_checked_in(status_res)):
             self.status = "ALREADY_DONE"
+            if self.coins_earned == 0 and status_res:
+                self._extract_telemetry(status_res, extract_coins=True)
             logger.info(f"[{self.account_name}] ℹ️ Чекін на сьогодні вже зараховано (стрік: {self.streak_days} дн.)")
         else:
             # 4. Виконання чекіну через mtop.aliexpress.coin.pc.sign
             sign_res = self._call_mtop("mtop.aliexpress.coin.pc.sign", data=sign_payload)
+            if self.status == "CAPTCHA_REQUIRED":
+                logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну повернуло вимогу капчі (WAF)!")
+                return False
+
             if sign_res:
-                if is_session_expired(sign_res):
+                if is_captcha_required(sign_res):
+                    self.status = "CAPTCHA_REQUIRED"
+                    logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну повернуло вимогу капчі (WAF)!")
+                    return False
+                elif is_session_expired(sign_res):
                     self.session_valid = False
                     self.status = "SESSION_EXPIRED"
                     logger.error(f"[{self.account_name}] ❌ Сесія AliExpress недійсна або прострочена!")
                     return False
                 elif is_already_checked_in(sign_res):
                     self.status = "ALREADY_DONE"
-                    self._extract_telemetry(sign_res)
+                    self._extract_telemetry(sign_res, extract_coins=True)
+                    if self.coins_earned == 0 and status_res:
+                        self._extract_coins_from_sign_list(status_res)
                     logger.info(f"[{self.account_name}] ℹ️ Чекін на сьогодні вже був виконаний раніше.")
                 elif is_checkin_success(sign_res):
                     self.status = "SUCCESS"
-                    self._extract_telemetry(sign_res)
+                    has_explicit_days = self._has_explicit_streak_days(sign_res)
+                    if not has_explicit_days:
+                        self.streak_days = (self.streak_days + 1) if self.streak_days > 0 else 1
+                    self._extract_telemetry(sign_res, extract_coins=True)
                     if self.streak_days == 0:
                         self.streak_days = 1
+                    if self.coins_earned == 0 and status_res:
+                        self._extract_coins_from_sign_list(status_res)
                     logger.info(f"[{self.account_name}] ✅ Чекін успішно виконано! (Стрік: {self.streak_days} дн.)")
                 else:
                     self.status = "FAILED"
                     logger.warning(f"[{self.account_name}] ⚠️ Чекін не підтверджено автоматично (можливо, вже зараховано або потрібне оновлення cookies).")
             else:
-                self.status = "FAILED"
+                if self.status != "CAPTCHA_REQUIRED":
+                    self.status = "FAILED"
                 logger.warning(f"[{self.account_name}] ⚠️ Не отримано відповіді від ендпоінту чекіну.")
+
+            if self.status == "CAPTCHA_REQUIRED":
+                return False
 
         # 5. Отримання точного балансу монет через mtop.aliexpress.coin.execute
         self._fetch_coin_balance()

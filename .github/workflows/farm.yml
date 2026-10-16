@@ -49,8 +49,18 @@ jobs:
           ALI_COOKIES_8: ${{ secrets.ALI_COOKIES_8 }}
           ALI_COOKIES_9: ${{ secrets.ALI_COOKIES_9 }}
           ALI_COOKIES_10: ${{ secrets.ALI_COOKIES_10 }}
-          # Підтримка проксі (опційно)
+          # Підтримка проксі (опційно для окремих акаунтів)
           ALI_PROXY: ${{ secrets.ALI_PROXY }}
+          ALI_PROXY_1: ${{ secrets.ALI_PROXY_1 }}
+          ALI_PROXY_2: ${{ secrets.ALI_PROXY_2 }}
+          ALI_PROXY_3: ${{ secrets.ALI_PROXY_3 }}
+          ALI_PROXY_4: ${{ secrets.ALI_PROXY_4 }}
+          ALI_PROXY_5: ${{ secrets.ALI_PROXY_5 }}
+          ALI_PROXY_6: ${{ secrets.ALI_PROXY_6 }}
+          ALI_PROXY_7: ${{ secrets.ALI_PROXY_7 }}
+          ALI_PROXY_8: ${{ secrets.ALI_PROXY_8 }}
+          ALI_PROXY_9: ${{ secrets.ALI_PROXY_9 }}
+          ALI_PROXY_10: ${{ secrets.ALI_PROXY_10 }}
           # Сповіщення в Telegram (опційно)
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

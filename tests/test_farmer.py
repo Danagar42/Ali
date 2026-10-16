@@ -21,9 +21,10 @@ from src.checkin import (
     generate_mtop_sign,
     is_checkin_success,
     is_already_checked_in,
+    is_captcha_required,
     CheckinManager
 )
-from src.coins import CoinsFarmManager
+from src.coins import CoinsFarmManager, REPORT_TASK_URLS
 from src.coupons import CouponCollector
 import src.main as main_module
 
@@ -782,6 +783,7 @@ class TestModernCheckinAndRegionalCompatibility(unittest.TestCase):
         self.assertEqual(mgr.coins_earned, 30)
 
     def test_coins_dead_endpoints_not_spammed(self):
+        CoinsFarmManager.reset_dead_urls()
         client = AliClient(cookies={"sid": "test"})
         manager = CoinsFarmManager(client)
 
@@ -793,11 +795,877 @@ class TestModernCheckinAndRegionalCompatibility(unittest.TestCase):
         with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
              patch.object(client, "post", return_value=html_resp) as mock_post:
             done = manager.farm_browse_tasks(count=3)
-            self.assertEqual(done, 3)
+            self.assertEqual(done, 0)
             # Both report URLs should only be attempted once, then disabled (so max 2 POST calls instead of 6)
             self.assertLessEqual(mock_post.call_count, 2)
 
 
+class TestAuditFixesAndOptimizations(unittest.TestCase):
+    def setUp(self):
+        CoinsFarmManager.reset_dead_urls()
+        CouponCollector.reset_dead_endpoints()
+
+    def tearDown(self):
+        CoinsFarmManager.reset_dead_urls()
+        CouponCollector.reset_dead_endpoints()
+
+    # --- Task 1: Failure Masking Fix ---
+
+    @patch("src.main.initial_random_jitter")
+    @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
+    @patch("src.main.CheckinManager")
+    @patch("src.main.CoinsFarmManager")
+    @patch("src.main.CouponCollector")
+    def test_main_exits_with_error_when_checkin_fails_even_if_browse_tasks_done(
+        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+    ):
+        instance_checkin = MagicMock()
+        instance_checkin.run_checkin.return_value = False  # Checkin failed
+        instance_checkin.session_valid = True
+        instance_checkin.status = "FAILED"
+        mock_checkin.return_value = instance_checkin
+
+        instance_coins = MagicMock()
+        instance_coins.farm_browse_tasks.return_value = 4  # Browsing succeeded
+        mock_coins.return_value = instance_coins
+
+        with patch("sys.exit") as mock_exit:
+            main_module.main()
+            mock_exit.assert_called_with(1)
+
+    @patch("src.main.initial_random_jitter")
+    @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
+    @patch("src.main.CheckinManager")
+    @patch("src.main.CoinsFarmManager")
+    @patch("src.main.CouponCollector")
+    def test_main_succeeds_when_checkin_ok_and_session_valid(
+        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+    ):
+        instance_checkin = MagicMock()
+        instance_checkin.run_checkin.return_value = True
+        instance_checkin.session_valid = True
+        instance_checkin.status = "SUCCESS"
+        mock_checkin.return_value = instance_checkin
+
+        instance_coins = MagicMock()
+        instance_coins.farm_browse_tasks.return_value = 0
+        mock_coins.return_value = instance_coins
+
+        with patch("sys.exit") as mock_exit:
+            main_module.main()
+            mock_exit.assert_not_called()
+
+    @patch("src.main.initial_random_jitter")
+    @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
+    @patch("src.main.CheckinManager")
+    @patch("src.main.CoinsFarmManager")
+    @patch("src.main.CouponCollector")
+    def test_main_exits_when_checkin_ok_but_session_invalid(
+        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+    ):
+        instance_checkin = MagicMock()
+        instance_checkin.run_checkin.return_value = True
+        instance_checkin.session_valid = False
+        instance_checkin.status = "SESSION_EXPIRED"
+        mock_checkin.return_value = instance_checkin
+
+        with patch("sys.exit") as mock_exit:
+            main_module.main()
+            mock_exit.assert_called_with(1)
+
+    def test_notifications_counts_success_only_on_valid_checkin(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Acc1_BrowseOnly",
+            checkin_status="FAILED",
+            tasks_done=4,
+            session_valid=True
+        ))
+        dispatcher.add_summary(AccountSummary(
+            name="Acc2_CheckinOk",
+            checkin_status="SUCCESS",
+            tasks_done=0,
+            session_valid=True
+        ))
+        dispatcher.add_summary(AccountSummary(
+            name="Acc3_AlreadyDone_InvalidSession",
+            checkin_status="ALREADY_DONE",
+            tasks_done=2,
+            session_valid=False
+        ))
+
+        # Checkin success should only be 1 (Acc2_CheckinOk)
+        success_count = sum(
+            1 for s in dispatcher.summaries
+            if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid
+        )
+        self.assertEqual(success_count, 1)
+
+    def test_coins_browse_no_fake_completion_on_page_ok(self):
+        CoinsFarmManager.reset_dead_urls()
+        client = AliClient(cookies={"sid": "test"})
+        manager = CoinsFarmManager(client)
+
+        with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(manager, "_report_task_complete", return_value=False):
+            done = manager.farm_browse_tasks(count=3)
+            self.assertEqual(done, 0, "Browsing HTTP 200 must not increment completed count if reporting failed!")
+
+    def test_coins_browse_counts_real_reported_tasks(self):
+        CoinsFarmManager.reset_dead_urls()
+        client = AliClient(cookies={"sid": "test"})
+        manager = CoinsFarmManager(client)
+
+        reports = [True, False, True]
+        with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(manager, "_report_task_complete", side_effect=reports):
+            done = manager.farm_browse_tasks(count=3)
+            self.assertEqual(done, 2)
+
+    # --- Task 2: Coin Leakage Fix ---
+
+    def test_coins_earned_not_set_if_checkin_fails(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 5,
+                    "signList": [{"days": 5, "coins": 25}, {"days": 6, "coins": 30}]
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return {"ret": ["FAIL_SYS_SERVICE_TIMEOUT::Timeout"]}
+                return None
+            mock_mtop.side_effect = mock_call
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "FAILED")
+            self.assertEqual(mgr.coins_earned, 0, "coins_earned must remain 0 when checkin fails!")
+
+    def test_coins_earned_populated_when_sign_today_true(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": True,
+                    "signDays": 7,
+                    "signList": [{"days": 7, "coins": 35}]
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop", return_value=status_res), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.coins_earned, 35)
+
+    def test_coins_earned_populated_when_pc_sign_succeeds(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 4,
+                    "signList": [{"days": 5, "coins": 25}]
+                }
+            }
+        }
+        sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 5,
+                    "coins": 25
+                }
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return sign_res
+                return None
+            mock_mtop.side_effect = mock_call
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 25)
+
+    # --- Task 3: HTML Escaping for Telegram ---
+
+    def test_telegram_html_escaping(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "test_token"
+        dispatcher.telegram_chat_id = "12345"
+        dispatcher.add_summary(AccountSummary(
+            name="Buyer <VIP & Super>",
+            checkin_status="FAILED",
+            error_message="Error: <tag> & symbols"
+        ))
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=200)
+            dispatcher.send_telegram_notification()
+            self.assertTrue(mock_post.called)
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("Buyer &lt;VIP &amp; Super&gt;", sent_text)
+            self.assertNotIn("Buyer <VIP & Super>", sent_text)
+            self.assertIn("Error: &lt;tag&gt; &amp; symbols", sent_text)
+            self.assertNotIn("<tag>", sent_text)
+
+    # --- Task 4: Proxy Secrets in Workflow ---
+
+    def test_workflow_contains_proxy_secrets_1_to_10(self):
+        workflow_path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "farm.yml")
+        self.assertTrue(os.path.exists(workflow_path), f"Workflow file not found at {workflow_path}")
+        with open(workflow_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        for i in range(1, 11):
+            expected_key = f"ALI_PROXY_{i}:"
+            expected_secret = f"${{{{ secrets.ALI_PROXY_{i} }}}}"
+            self.assertIn(expected_key, content, f"Missing {expected_key} in farm.yml")
+            self.assertIn(expected_secret, content, f"Missing {expected_secret} in farm.yml")
+
+    # --- Task 5: Dead REST Endpoints Optimization ---
+
+    def test_coins_dead_endpoints_cached_across_instances(self):
+        CoinsFarmManager.reset_dead_urls()
+        client1 = AliClient(cookies={"sid": "test1"})
+        mgr1 = CoinsFarmManager(client1)
+
+        err_resp = MagicMock(status_code=404, text="Not Found")
+        with patch.object(client1.session, "get", return_value=err_resp) as mock_get:
+            tasks = mgr1.fetch_active_tasks()
+            self.assertEqual(tasks, [])
+            self.assertGreater(mock_get.call_count, 0)
+
+        # Instance 2 for another account: should bypass dead endpoints immediately
+        client2 = AliClient(cookies={"sid": "test2"})
+        mgr2 = CoinsFarmManager(client2)
+        with patch.object(client2.session, "get") as mock_get2:
+            tasks2 = mgr2.fetch_active_tasks()
+            self.assertEqual(tasks2, [])
+            self.assertEqual(mock_get2.call_count, 0, "Second instance must not query dead URLs again!")
+
+    def test_coupon_collector_skips_when_hub_unavailable(self):
+        CouponCollector.reset_dead_endpoints()
+        client1 = AliClient(cookies={"sid": "test1"})
+        collector1 = CouponCollector(client1)
+
+        resp_404 = MagicMock(status_code=404, text="Not Found")
+        with patch.object(client1.session, "get", return_value=resp_404), \
+             patch.object(client1.session, "post") as mock_post:
+            count = collector1.collect_available_coupons()
+            self.assertEqual(count, 0)
+            self.assertEqual(mock_post.call_count, 0, "No candidate claims should be sent when coupon hub is 404!")
+
+        # Second account instance should bypass immediately
+        client2 = AliClient(cookies={"sid": "test2"})
+        collector2 = CouponCollector(client2)
+        with patch.object(client2.session, "get") as mock_get2, \
+             patch.object(client2.session, "post") as mock_post2:
+            count2 = collector2.collect_available_coupons()
+            self.assertEqual(count2, 0)
+            self.assertEqual(mock_get2.call_count, 0, "Second instance should skip dead hub GET calls!")
+            self.assertEqual(mock_post2.call_count, 0)
+
+    # --- Task 6: Network Resilience with Retry Adapter ---
+
+    def test_client_retry_adapter_configuration(self):
+        client = AliClient(cookies={})
+        for scheme in ("https://", "http://"):
+            adapter = client.session.adapters.get(scheme)
+            self.assertIsNotNone(adapter, f"Adapter for {scheme} must be mounted!")
+            self.assertIsNotNone(adapter.max_retries, f"max_retries for {scheme} must be set!")
+            self.assertEqual(adapter.max_retries.total, 3)
+            self.assertEqual(adapter.max_retries.backoff_factor, 1.5)
+            for status in (500, 502, 503, 504):
+                self.assertIn(status, adapter.max_retries.status_forcelist, f"Status {status} must be in forcelist!")
+
+    # --- Task 7: WAF / Captcha Detection ---
+
+    def test_is_captcha_required_detection(self):
+        from src.checkin import is_captcha_required
+        self.assertTrue(is_captcha_required({"ret": ["RGV587_RUN_SCRIPT::Security verification required"]}))
+        self.assertTrue(is_captcha_required({"ret": ["FAIL_SYS_USER_VALIDATE::Need verification"]}))
+        self.assertTrue(is_captcha_required("_____tmd_____/punish?x=1"))
+        self.assertTrue(is_captcha_required({"data": {"url": "https://sec.aliexpress.com/_____tmd_____/punish"}}))
+        self.assertFalse(is_captcha_required({"ret": ["SUCCESS::ok"]}))
+        self.assertFalse(is_captcha_required(None))
+        self.assertFalse(is_captcha_required({}))
+        self.assertFalse(is_captcha_required(""))
+
+    def test_checkin_sets_captcha_required_status(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        captcha_resp = {"ret": ["RGV587_RUN_SCRIPT::Alibaba WAF Block"]}
+        with patch.object(mgr, "_call_mtop", return_value=captcha_resp), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+
+    def test_checkin_sets_captcha_required_on_user_validate(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        validate_resp = {"ret": ["FAIL_SYS_USER_VALIDATE::User validation required"]}
+        with patch.object(mgr, "_call_mtop", return_value=validate_resp), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+
+    def test_captcha_not_treated_as_session_expired(self):
+        from src.checkin import is_session_expired
+        captcha_payload = {"ret": ["FAIL_SYS_USER_VALIDATE::User verification needed"]}
+        self.assertFalse(is_session_expired(captcha_payload), "Captcha must NOT be classified as SESSION_EXPIRED!")
+
+    def test_captcha_required_notification_badge_and_instructions(self):
+        import tempfile
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "token123"
+        dispatcher.telegram_chat_id = "chat456"
+
+        summary = AccountSummary(
+            name="Buyer_Captcha",
+            checkin_status="CAPTCHA_REQUIRED",
+            session_valid=True
+        )
+        dispatcher.add_summary(summary)
+
+        # 1. Icon mapping
+        self.assertEqual(dispatcher._checkin_icon("CAPTCHA_REQUIRED"), "🧩 Капча")
+
+        # 2. Telegram message formatting
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=200)
+            dispatcher.send_telegram_notification()
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("🧩 <b>Buyer_Captcha</b>: 🧩 Капча", sent_text)
+            self.assertIn("Виявлено захист Alibaba WAF!", sent_text)
+
+        # 3. GitHub step summary
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIn("Alibaba WAF Captcha", md)
+                self.assertIn("🧩 Капча", md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_is_captcha_required_with_requests_response(self):
+        import requests
+        from src.checkin import is_captcha_required
+
+        # 403 Forbidden with WAF challenge script
+        resp_403 = requests.Response()
+        resp_403.status_code = 403
+        resp_403._content = b"<html><script>RGV587_RUN_SCRIPT</script></html>"
+        self.assertTrue(is_captcha_required(resp_403), "403 Response with RGV587 must be detected as CAPTCHA!")
+
+        # 302 Redirect to punishment slider
+        resp_302 = requests.Response()
+        resp_302.status_code = 302
+        resp_302.url = "https://sec.aliexpress.com/_____tmd_____/punish?x=abc123"
+        self.assertTrue(is_captcha_required(resp_302), "302 Response with punish URL must be detected as CAPTCHA!")
+
+        # 200 OK Response with JSON payload
+        resp_200 = requests.Response()
+        resp_200.status_code = 200
+        resp_200._content = b'{"ret": ["FAIL_SYS_USER_VALIDATE::User verification needed"]}'
+        self.assertTrue(is_captcha_required(resp_200), "200 Response with FAIL_SYS_USER_VALIDATE must be detected as CAPTCHA!")
+
+        # Clean 200 Response
+        resp_clean = requests.Response()
+        resp_clean.status_code = 200
+        resp_clean._content = b'{"ret": ["SUCCESS::ok"], "data": {"signToday": true}}'
+        self.assertFalse(is_captcha_required(resp_clean), "Clean Response must not trigger captcha detection!")
+
+    def test_is_session_expired_with_requests_response_401(self):
+        import requests
+        from src.checkin import is_session_expired
+
+        resp_401 = requests.Response()
+        resp_401.status_code = 401
+        resp_401._content = b'{"ret": ["FAIL_SYS_USER_NOT_LOGIN::Not logged in"]}'
+        self.assertTrue(is_session_expired(resp_401), "401 Response with FAIL_SYS_USER_NOT_LOGIN must be detected as expired!")
+
+    def test_is_already_checked_in_respects_explicit_sign_today_false(self):
+        from src.checkin import is_already_checked_in
+        payload = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signToday": False,
+                "msg": "Notice: user already checked in on another promotion"
+            }
+        }
+        self.assertFalse(is_already_checked_in(payload), "signToday=False must never be classified as ALREADY_CHECKED_IN!")
+
+    def test_extract_telemetry_guards_against_sign_today_false(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        payload = {
+            "data": {
+                "signToday": False,
+                "signDays": 3,
+                "coins": 50,
+                "awardCoins": 50
+            }
+        }
+        # Direct call to _extract_telemetry without extract_coins argument
+        mgr._extract_telemetry(payload)
+        self.assertEqual(mgr.streak_days, 3)
+        self.assertEqual(mgr.coins_earned, 0, "coins_earned must NOT be extracted when signToday is False!")
+
+    def test_checkin_success_fallback_uses_sign_list_not_yesterday_top_level_coins(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 4,
+                    "coins": 15,  # yesterday's coins
+                    "signList": [{"days": 4, "coins": 15}, {"days": 5, "coins": 35}]
+                }
+            }
+        }
+        sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 5
+                    # No top-level coins in sign response
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return sign_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.streak_days, 5)
+            self.assertEqual(mgr.coins_earned, 35, "Must extract day 5 coins (35) from signList, NOT yesterday's coins (15)!")
+
+    def test_coins_dead_endpoints_cached_on_none_and_504(self):
+        CoinsFarmManager.reset_dead_urls()
+        client = AliClient(cookies={"sid": "test"})
+        mgr = CoinsFarmManager(client)
+
+        # 1. Connection error returning None
+        with patch.object(client, "get", return_value=None):
+            tasks = mgr.fetch_active_tasks()
+            self.assertEqual(tasks, [])
+            self.assertIn("https://coins.aliexpress.com/api/tasks", mgr._dead_urls)
+            self.assertIn("https://coins.aliexpress.com/api/task/list", mgr._dead_urls)
+
+        # 2. 504 Gateway Timeout on report
+        CoinsFarmManager.reset_dead_urls()
+        resp_504 = MagicMock(status_code=504, text="Gateway Timeout")
+        with patch.object(client, "post", return_value=resp_504):
+            reported = mgr._report_task_complete("BROWSE_ITEM", "task1")
+            self.assertFalse(reported)
+            self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
+            self.assertIn("https://coins.aliexpress.com/api/task/finish", mgr._dead_urls)
+
+    def test_coupons_dead_endpoints_cached_on_none_and_504(self):
+        CouponCollector.reset_dead_endpoints()
+        client = AliClient(cookies={"sid": "test"})
+        collector = CouponCollector(client)
+
+        # 1. Hub returning None (network timeout)
+        with patch.object(client, "get", return_value=None):
+            count = collector.collect_available_coupons()
+            self.assertEqual(count, 0)
+            self.assertIn("https://www.aliexpress.com/coupon-center.html", collector._dead_endpoints)
+            self.assertIn("https://campaign.aliexpress.com/wow/gcp/ae/channel/ae/coupon-center/index", collector._dead_endpoints)
+
+        # 2. Claim endpoint returning 504
+        CouponCollector.reset_dead_endpoints()
+        resp_hub_ok = MagicMock(status_code=200, text="<html>activityId='test_act'</html>")
+        resp_claim_504 = MagicMock(status_code=504, text="Gateway Timeout")
+        with patch.object(client, "get", return_value=resp_hub_ok), \
+             patch.object(client, "post", return_value=resp_claim_504):
+            claimed = collector.collect_available_coupons()
+            self.assertEqual(claimed, 0)
+            self.assertIn("https://campaign.aliexpress.com/coupon/claim", collector._dead_endpoints)
+            self.assertIn("https://coupon.aliexpress.com/buyer/coupon/applyCoupon.htm", collector._dead_endpoints)
+
+    def test_client_retry_adapter_raise_on_status_false(self):
+        client = AliClient(cookies={})
+        for scheme in ("https://", "http://"):
+            adapter = client.session.adapters.get(scheme)
+            self.assertFalse(adapter.max_retries.raise_on_status, "raise_on_status must be False so status responses are returned!")
+
+    def test_step_summary_escapes_table_pipes_in_account_name(self):
+        import tempfile
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Buyer|With|Pipes",
+            checkin_status="SUCCESS",
+            session_valid=True
+        ))
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIn("Buyer\\|With\\|Pipes", md, "Markdown table pipe delimiter in account name must be escaped!")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_run_checkin_aborts_immediately_on_sign_list_captcha(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    mgr.status = "CAPTCHA_REQUIRED"
+                    return None
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    self.fail("mtop.aliexpress.coin.pc.sign must NOT be called when sign.list triggered CAPTCHA!")
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+
+    def test_checkin_success_fallback_advances_streak_and_extracts_day5_coins_when_sign_omits_signdays(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 4,
+                    "coins": 15,  # yesterday's coins
+                    "signList": [{"days": 4, "coins": 15}, {"days": 5, "coins": 35}]
+                }
+            }
+        }
+        # sign_res does not provide signDays or coins
+        sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return sign_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.streak_days, 5, "Streak must advance to 5 when sign_res omits signDays!")
+            self.assertEqual(mgr.coins_earned, 35, "Must extract Day 5 coins (35) from signList fallback, NOT yesterday's Day 4 coins (15)!")
+
+    def test_extract_coins_from_sign_list_stringified_days(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        mgr.streak_days = 5
+
+        data = {
+            "data": {
+                "signList": [
+                    {"days": "4", "coins": "20"},
+                    {"days": "5", "coins": "50"},
+                    {"days": "6", "coins": "70"}
+                ]
+            }
+        }
+        mgr._extract_coins_from_sign_list(data)
+        self.assertEqual(mgr.coins_earned, 50, "Stringified 'days': '5' must match integer streak_days 5!")
+
+        # Also test with 'day' key and float string
+        mgr.coins_earned = 0
+        mgr.streak_days = 6
+        data_float = {
+            "data": {
+                "signList": [
+                    {"day": "6.0", "coins": " 75 "}
+                ]
+            }
+        }
+        mgr._extract_coins_from_sign_list(data_float)
+        self.assertEqual(mgr.coins_earned, 75, "Stringified 'day': '6.0' with spaces must match integer streak_days 6!")
+
+    def test_run_checkin_aborts_immediately_on_sign_captcha_without_fetching_balance(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 2
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(mgr, "_fetch_coin_balance") as mock_fetch_balance, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    mgr.status = "CAPTCHA_REQUIRED"
+                    return None
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+            mock_fetch_balance.assert_not_called()
+
+    def test_is_captcha_required_inspects_response_url_and_aborts_checkin(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        resp = MagicMock()
+        resp.text = ""  # empty body
+        resp.url = "https://acs.aliexpress.com/_____tmd_____/punish?x=123"
+        resp.status_code = 302
+        resp.headers = {}
+
+        # Direct verification of is_captcha_required with Response object
+        self.assertTrue(is_captcha_required(resp), "Must detect captcha from redirect URL even with empty text!")
+
+        # Verification that run_checkin detects it and aborts
+        with patch.object(client, "get", return_value=resp), \
+             patch.object(mgr, "_call_mtop") as mock_mtop:
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+            mock_mtop.assert_not_called()
+
+    def test_farm_browse_tasks_skips_catalog_when_all_report_urls_are_dead(self):
+        CoinsFarmManager.reset_dead_urls()
+        client = AliClient(cookies={"sid": "test"})
+        mgr = CoinsFarmManager(client)
+
+        for u in REPORT_TASK_URLS:
+            mgr._dead_urls.add(u)
+
+        with patch.object(client, "get") as mock_get:
+            res = mgr.farm_browse_tasks(count=4)
+            self.assertEqual(res, 0)
+            mock_get.assert_not_called()
+
+
+    def test_checkin_success_updates_streak_when_sign_res_resets_streak_to_1(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 4,
+                    "coins": 15
+                }
+            }
+        }
+        # Server resets streak to 1 after missed day or new cycle
+        sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 1,
+                    "coins": 10
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return sign_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.streak_days, 1, "Explicit signDays: 1 from sign_res must overwrite pre-checkin signDays: 4!")
+            self.assertEqual(mgr.coins_earned, 10)
+
+    def test_extract_coins_from_sign_list_accepts_response_object_and_json_str(self):
+        import json
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        mgr.streak_days = 3
+
+        # 1. requests.Response object
+        resp = MagicMock()
+        resp.text = json.dumps({"data": {"signList": [{"days": 3, "coins": 45}]}})
+        resp.json.return_value = {"data": {"signList": [{"days": 3, "coins": 45}]}}
+        mgr._extract_coins_from_sign_list(resp)
+        self.assertEqual(mgr.coins_earned, 45, "Must extract coins from requests.Response object!")
+
+        # 2. JSON string
+        mgr.coins_earned = 0
+        mgr.streak_days = 4
+        json_str = json.dumps({"data": {"signList": [{"days": 4, "coins": 60}]}})
+        mgr._extract_coins_from_sign_list(json_str)
+        self.assertEqual(mgr.coins_earned, 60, "Must extract coins from JSON string!")
+
+    def test_extract_coins_from_sign_list_supports_alternative_keys(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        # MTOP dayNum and awardCoins
+        mgr.streak_days = 5
+        data1 = {"data": {"signList": [{"dayNum": 5, "awardCoins": 55}]}}
+        mgr._extract_coins_from_sign_list(data1)
+        self.assertEqual(mgr.coins_earned, 55, "Must support 'dayNum' and 'awardCoins' keys!")
+
+        # streak and coinCount
+        mgr.coins_earned = 0
+        mgr.streak_days = 2
+        data2 = {"data": {"signList": [{"streak": 2, "coinCount": 20}]}}
+        mgr._extract_coins_from_sign_list(data2)
+        self.assertEqual(mgr.coins_earned, 20, "Must support 'streak' and 'coinCount' keys!")
+
+        # signDays and coin
+        mgr.coins_earned = 0
+        mgr.streak_days = 7
+        data3 = {"data": {"signList": [{"signDays": 7, "coin": 70}]}}
+        mgr._extract_coins_from_sign_list(data3)
+        self.assertEqual(mgr.coins_earned, 70, "Must support 'signDays' and 'coin' keys!")
+
+    def test_extract_coins_from_sign_list_cycle_and_is_today_fallback(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        # Day 8 in a 7-day cyclical calendar -> matches Day 1 (coins: 10)
+        mgr.streak_days = 8
+        data_7day = {
+            "data": {
+                "signList": [
+                    {"days": 1, "coins": 10},
+                    {"days": 2, "coins": 15},
+                    {"days": 3, "coins": 20},
+                    {"days": 4, "coins": 25},
+                    {"days": 5, "coins": 30},
+                    {"days": 6, "coins": 40},
+                    {"days": 7, "coins": 70}
+                ]
+            }
+        }
+        mgr._extract_coins_from_sign_list(data_7day)
+        self.assertEqual(mgr.coins_earned, 10, "Streak 8 in 7-day calendar must match day 1 cycle reward!")
+
+        # Fallback to isToday: True when day numbers do not align
+        mgr.coins_earned = 0
+        mgr.streak_days = 99
+        data_today = {
+            "data": {
+                "signList": [
+                    {"name": "Step 1", "coins": 5},
+                    {"name": "Step 2", "coins": 50, "isToday": True}
+                ]
+            }
+        }
+        mgr._extract_coins_from_sign_list(data_today)
+        self.assertEqual(mgr.coins_earned, 50, "Must fallback to element with isToday: True!")
+
+    def test_extract_coins_from_sign_list_graceful_on_empty_or_no_match(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+        mgr.streak_days = 5
+
+        # Empty signList
+        mgr._extract_coins_from_sign_list({"data": {"signList": []}})
+        self.assertEqual(mgr.coins_earned, 0)
+
+        # None input
+        mgr._extract_coins_from_sign_list(None)
+        self.assertEqual(mgr.coins_earned, 0)
+
+        # Invalid structure
+        mgr._extract_coins_from_sign_list("Not a JSON")
+        self.assertEqual(mgr.coins_earned, 0)
+
+    def test_coins_dead_endpoints_handles_405_method_not_allowed(self):
+        CoinsFarmManager.reset_dead_urls()
+        client = AliClient(cookies={"sid": "test"})
+        mgr = CoinsFarmManager(client)
+
+        resp_405 = MagicMock(status_code=405, text="Method Not Allowed")
+        with patch.object(client, "post", return_value=resp_405):
+            reported = mgr._report_task_complete("BROWSE_ITEM", "task1")
+            self.assertFalse(reported)
+            self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
 

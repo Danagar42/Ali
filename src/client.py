@@ -5,6 +5,8 @@ import random
 import logging
 from typing import Dict, Any, Optional, Union
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from src.auth import parse_cookie_string
 from src.config import (
     get_random_browser_profile,
@@ -30,7 +32,8 @@ class AliClient:
     - синхронізовані User-Agent та Client Hints під реальні платформи (Chrome, Firefox, Safari, Edge, Android),
     - рандомізовані затримки між запитами,
     - підтримка проксі (HTTP, HTTPS, SOCKS5),
-    - збереження стану сесії та cookies.
+    - збереження стану сесії та cookies,
+    - автоматичний повтор запитів при мережевих збоях (500, 502, 503, 504).
     """
     def __init__(
         self,
@@ -42,6 +45,19 @@ class AliClient:
     ):
         self.account_name = account_name
         self.session = requests.Session()
+
+        # Автоматичний повтор запитів при мережевих помилках та 500/502/503/504
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1.5,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "HEAD", "OPTIONS"],
+            raise_on_status=False
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
         cookie_dict = parse_cookie_string(cookies) if isinstance(cookies, str) else (cookies or {})
         for k, v in cookie_dict.items():
             self.session.cookies.set(k, v, domain=".aliexpress.com", path="/")
