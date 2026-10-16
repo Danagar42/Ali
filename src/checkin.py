@@ -21,7 +21,8 @@ from src.config import (
     TASK_PROCESS_ISSUE_API,
     TASK_LOCALE,
     TASK_LANG,
-    TASK_CURRENCY
+    TASK_CURRENCY,
+    TASK_TTID
 )
 
 logger = logging.getLogger(__name__)
@@ -603,6 +604,17 @@ class CheckinManager:
         else:
             asac_val = ASAC_CAMPAIGN
 
+        ttid_val = TASK_TTID if is_task_api else None
+        if isinstance(data, dict) and "ttid" in data:
+            ttid_val = str(data["ttid"])
+        elif isinstance(data, str):
+            try:
+                parsed_check = json.loads(data)
+                if isinstance(parsed_check, dict) and "ttid" in parsed_check:
+                    ttid_val = str(parsed_check["ttid"])
+            except Exception:
+                pass
+
         if data is None or data == "" or data == {}:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
@@ -613,6 +625,7 @@ class CheckinManager:
                     "projectAppKey": PROJECT_APP_KEY,
                     "sceneId": TASK_SCENE_ID,
                     "asac": asac_val,
+                    "ttid": ttid_val or TASK_TTID,
                     "fromNew": True,
                     "locale": TASK_LOCALE,
                     "_lang": TASK_LANG,
@@ -650,6 +663,7 @@ class CheckinManager:
             data_copy = dict(data)
             if is_task_api:
                 data_copy["asac"] = asac_val
+                data_copy.setdefault("ttid", ttid_val or TASK_TTID)
                 data_copy.setdefault("projectAppKey", PROJECT_APP_KEY)
                 data_copy.setdefault("taskAppKey", TASK_APP_KEY)
                 data_copy.setdefault("taskSceneId", TASK_SCENE_ID)
@@ -673,6 +687,7 @@ class CheckinManager:
                 if isinstance(parsed_data, dict):
                     if is_task_api:
                         parsed_data["asac"] = asac_val
+                        parsed_data.setdefault("ttid", ttid_val or TASK_TTID)
                         parsed_data.setdefault("projectAppKey", PROJECT_APP_KEY)
                         parsed_data.setdefault("taskAppKey", TASK_APP_KEY)
                         parsed_data.setdefault("taskSceneId", TASK_SCENE_ID)
@@ -708,7 +723,7 @@ class CheckinManager:
         t = str(int(time.time() * 1000))
         sign = generate_mtop_sign(token, t, app_key, data_str)
 
-        return {
+        mtop_params = {
             "jsv": MTOP_JSV,
             "appKey": app_key,
             "t": t,
@@ -720,6 +735,9 @@ class CheckinManager:
             "asac": asac_val,
             "data": data_str
         }
+        if ttid_val:
+            mtop_params["ttid"] = ttid_val
+        return mtop_params
 
     def _call_mtop(
         self,

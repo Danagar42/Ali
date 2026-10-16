@@ -15,7 +15,8 @@ from src.config import (
     TASK_PROCESS_ISSUE_API,
     TASK_LOCALE,
     TASK_LANG,
-    TASK_CURRENCY
+    TASK_CURRENCY,
+    TASK_TTID
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,8 @@ class CoinsFarmManager:
         self.checkin_mgr = checkin_mgr
         self.task_coins_earned = 0
         self.completed_tasks = 0
+        self.status = "INIT"
+        self.error_message: Optional[str] = None
 
     @classmethod
     def reset_dead_urls(cls):
@@ -134,6 +137,7 @@ class CoinsFarmManager:
                         "taskAppKey": TASK_APP_KEY,
                         "projectAppKey": PROJECT_APP_KEY,
                         "asac": ASAC_TASK_CAMPAIGN,
+                        "ttid": TASK_TTID,
                         "fromNew": True,
                         "locale": TASK_LOCALE,
                         "_lang": TASK_LANG,
@@ -142,72 +146,119 @@ class CoinsFarmManager:
                         "currency": TASK_CURRENCY
                     }
                 )
-                if mtop_res and isinstance(mtop_res, dict):
-                    raw_items = []
-                    candidate_dicts = [mtop_res]
-                    data_field = mtop_res.get("data")
-                    if isinstance(data_field, dict):
-                        candidate_dicts.append(data_field)
-                        if isinstance(data_field.get("data"), dict):
-                            candidate_dicts.append(data_field["data"])
+                if not mtop_res or not isinstance(mtop_res, dict):
+                    logger.warning(f"[{self.account_name}] ⚠️ MTOP {TASK_DELIVERY_QUERY_API} не повернув відповіді.")
+                    self.status = "FAILED"
+                    self.error_message = "No response from MTOP"
+                    return []
 
-                    for d in candidate_dicts:
-                        for k in ("result", "taskList", "tasks", "taskDeliveryList", "deliveryList"):
-                            val = d.get(k)
-                            if isinstance(val, list) and val and isinstance(val[0], dict):
-                                raw_items = val
-                                break
-                        if raw_items:
+                ret = mtop_res.get("ret")
+                ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+
+                is_success = False
+                if isinstance(ret, list) and ret:
+                    if "SUCCESS" in ret_str.upper():
+                        is_success = True
+                    else:
+                        logger.error(f"[{self.account_name}] ❌ Помилка запиту завдань ({TASK_DELIVERY_QUERY_API}): {ret_str}")
+                        self.status = "FAILED"
+                        self.error_message = ret_str
+                        return []
+                elif mtop_res.get("success") is True or (isinstance(mtop_res.get("data"), dict) and mtop_res["data"].get("success") is not False):
+                    is_success = True
+                elif "data" in mtop_res and ret is None:
+                    is_success = True
+
+                if not is_success:
+                    logger.error(f"[{self.account_name}] ❌ MTOP task.delivery.query завершився невдало: {ret_str or mtop_res}")
+                    self.status = "FAILED"
+                    self.error_message = ret_str or "Query failed"
+                    return []
+
+                # Виводимо повну структуру отриманого JSON (data) при успішній відповіді
+                data_field = mtop_res.get("data")
+                try:
+                    data_json_str = json.dumps(data_field, ensure_ascii=False)
+                except Exception:
+                    data_json_str = str(data_field)
+                logger.info(f"[{self.account_name}] 📋 Повна структура 'data' від {TASK_DELIVERY_QUERY_API}: {data_json_str}")
+
+                raw_items = []
+                candidate_dicts = [mtop_res]
+                if isinstance(data_field, dict):
+                    candidate_dicts.append(data_field)
+                    if isinstance(data_field.get("data"), dict):
+                        candidate_dicts.append(data_field["data"])
+
+                for d in candidate_dicts:
+                    for k in ("result", "taskList", "tasks", "taskDeliveryList", "deliveryList"):
+                        val = d.get(k)
+                        if isinstance(val, list) and val and isinstance(val[0], dict):
+                            raw_items = val
                             break
-
-                    if not raw_items and isinstance(data_field, list) and data_field and isinstance(data_field[0], dict):
-                        raw_items = data_field
-                    elif not raw_items and isinstance(data_field, dict) and isinstance(data_field.get("data"), list):
-                        sub_list = data_field["data"]
-                        if sub_list and isinstance(sub_list[0], dict):
-                            raw_items = sub_list
-
                     if raw_items:
-                        normalized = []
-                        for it in raw_items:
-                            if not isinstance(it, dict):
-                                continue
-                            materials = it.get("materials") or []
-                            mat = materials[0] if (isinstance(materials, list) and materials and isinstance(materials[0], dict)) else {}
+                        break
 
-                            task_id = it.get("taskInstanceId") or it.get("taskId") or it.get("id") or mat.get("taskInstanceId") or mat.get("taskId")
-                            status = mat.get("newTaskStatus") or it.get("status") or ("completed" if it.get("completed") else "todo")
-                            task_type = mat.get("taskType") if mat.get("taskType") is not None else it.get("taskType", 0)
-                            title = mat.get("taskTitle") or mat.get("title") or it.get("taskTitle") or it.get("title") or f"Task_{task_id}"
-                            action_url = mat.get("actionUrl") or mat.get("taskAction") or it.get("actionUrl") or BROWSE_TARGETS[0]
-                            un_issue = mat.get("unIssueRecord") or it.get("unIssueRecord")
+                if not raw_items and isinstance(data_field, list) and data_field and isinstance(data_field[0], dict):
+                    raw_items = data_field
+                elif not raw_items and isinstance(data_field, dict) and isinstance(data_field.get("data"), list):
+                    sub_list = data_field["data"]
+                    if sub_list and isinstance(sub_list[0], dict):
+                        raw_items = sub_list
 
-                            normalized.append({
-                                "taskId": task_id,
-                                "taskInstanceId": task_id,
-                                "taskAppKey": it.get("taskAppKey") or TASK_APP_KEY,
-                                "projectAppKey": it.get("projectAppKey") or PROJECT_APP_KEY,
-                                "taskSceneId": it.get("taskSceneId") or TASK_SCENE_ID,
-                                "sceneId": it.get("sceneId") or TASK_SCENE_ID,
-                                "taskType": task_type,
-                                "taskTitle": title,
-                                "status": str(status).lower(),
-                                "unIssueRecord": un_issue,
-                                "staySeconds": _clean_int(mat.get("staySeconds")) or 15,
-                                "actionUrl": action_url,
-                                "locale": it.get("locale") or TASK_LOCALE,
-                                "_lang": it.get("_lang") or TASK_LANG,
-                                "_currency": it.get("_currency") or TASK_CURRENCY,
-                                "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
-                                "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
-                                "raw": it
-                            })
+                if raw_items:
+                    normalized = []
+                    for it in raw_items:
+                        if not isinstance(it, dict):
+                            continue
+                        materials = it.get("materials") or []
+                        mat = materials[0] if (isinstance(materials, list) and materials and isinstance(materials[0], dict)) else {}
 
-                        if normalized:
-                            logger.info(f"[{self.account_name}] 📋 MTOP знайдено завдань платформи: {len(normalized)}")
-                            return normalized
+                        task_id = it.get("taskInstanceId") or it.get("taskId") or it.get("id") or mat.get("taskInstanceId") or mat.get("taskId")
+                        status = mat.get("newTaskStatus") or it.get("status") or ("completed" if it.get("completed") else "todo")
+                        task_type = mat.get("taskType") if mat.get("taskType") is not None else it.get("taskType", 0)
+                        title = mat.get("taskTitle") or mat.get("title") or it.get("taskTitle") or it.get("title") or f"Task_{task_id}"
+                        action_url = mat.get("actionUrl") or mat.get("taskAction") or it.get("actionUrl") or BROWSE_TARGETS[0]
+                        un_issue = mat.get("unIssueRecord") or it.get("unIssueRecord")
+
+                        normalized.append({
+                            "taskId": task_id,
+                            "taskInstanceId": task_id,
+                            "taskAppKey": it.get("taskAppKey") or TASK_APP_KEY,
+                            "projectAppKey": it.get("projectAppKey") or PROJECT_APP_KEY,
+                            "taskSceneId": it.get("taskSceneId") or TASK_SCENE_ID,
+                            "sceneId": it.get("sceneId") or TASK_SCENE_ID,
+                            "taskType": task_type,
+                            "taskTitle": title,
+                            "status": str(status).lower(),
+                            "unIssueRecord": un_issue,
+                            "staySeconds": _clean_int(mat.get("staySeconds")) or 15,
+                            "actionUrl": action_url,
+                            "locale": it.get("locale") or TASK_LOCALE,
+                            "_lang": it.get("_lang") or TASK_LANG,
+                            "_currency": it.get("_currency") or TASK_CURRENCY,
+                            "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
+                            "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
+                            "ttid": it.get("ttid") or TASK_TTID,
+                            "raw": it
+                        })
+
+                    if normalized:
+                        self.status = "SUCCESS"
+                        logger.info(f"[{self.account_name}] 📋 MTOP знайдено завдань платформи: {len(normalized)}")
+                        for idx, t in enumerate(normalized, 1):
+                            logger.info(f"[{self.account_name}]   [{idx}] ID: {t.get('taskId')} | '{t.get('taskTitle')}' | Статус: {t.get('status')} | Тип: {t.get('taskType')} | Час: {t.get('staySeconds')}с | URL: {t.get('actionUrl')}")
+                        return normalized
+
+                # Якщо відповідь SUCCESS, але список завдань порожній
+                self.status = "SUCCESS"
+                logger.info(f"[{self.account_name}] ℹ️ Активних завдань платформи на сьогодні не знайдено.")
+                return []
             except Exception as e:
-                logger.debug(f"[{self.account_name}] MTOP task delivery query: {e}")
+                logger.error(f"[{self.account_name}] ❌ Виняток під час MTOP task delivery query: {e}")
+                self.status = "FAILED"
+                self.error_message = str(e)
+                return []
 
         # 2. Legacy fallback для тестових моків та старих ендпоінтів
         task_query_urls = [
@@ -293,7 +344,6 @@ class CoinsFarmManager:
     def farm_browse_tasks(self, count: int = 4) -> int:
         """
         Виконує безпечні завдання із затримкою ~15 секунд та нарахуванням монет.
-        Якщо активних завдань платформи немає, виконує безпечний фоновий перегляд сторінок.
         """
         self.completed_tasks = 0
         self.task_coins_earned = 0
@@ -302,6 +352,10 @@ class CoinsFarmManager:
         if self.checkin_mgr is not None:
             logger.info(f"[{self.account_name}] 🛍️ Початок виконання завдань (безпечний перегляд ~15 сек, ліміт: {count})...")
             active_tasks = self.fetch_active_tasks()
+            if self.status == "FAILED":
+                logger.error(f"[{self.account_name}] ❌ Етап виконання завдань позначено як FAILED через помилку MTOP API.")
+                return 0
+
             safe_tasks = [t for t in active_tasks if self.is_safe_task(t)]
 
             if safe_tasks:
@@ -345,16 +399,20 @@ class CoinsFarmManager:
                             self.task_coins_earned += coins
                         logger.info(f"[{self.account_name}] ✅ Завдання '{title}' успішно зараховано! (+{coins if coins > 0 else 0} 🪙)")
 
+                self.status = "SUCCESS"
                 return self.completed_tasks
+            else:
+                logger.info(f"[{self.account_name}] ℹ️ Немає доступних безпечних завдань для виконання.")
+                self.status = "SUCCESS"
+                return 0
 
-        # 2. Якщо всі ендпоінти репорту вже відомі як мертві — пропускаємо перегляд без запитів
+        # 2. Якщо checkin_mgr відсутній (legacy fallback для ізольованих тестів)
         if all(u in self._dead_urls for u in REPORT_TASK_URLS):
             logger.debug(f"[{self.account_name}] Усі ендпоінти завершення завдань неактивні, пропускаємо перегляд сторінок.")
             return 0
 
-        # 3. Fallback: безпечний фоновий перегляд каталогу
         logger.info(f"[{self.account_name}] 🛍️ Фонова симуляція перегляду каталогу (к-ть: {count})...")
-        active_tasks = self.fetch_active_tasks() if not self.checkin_mgr else []
+        active_tasks = self.fetch_active_tasks()
         browse_task_ids = [
             t.get("taskId") for t in active_tasks
             if isinstance(t, dict) and t.get("taskId") and "browse" in str(t.get("taskType", "")).lower() and not t.get("completed", False)
@@ -402,6 +460,7 @@ class CoinsFarmManager:
             "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
             "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
             "sceneId": task.get("sceneId", TASK_SCENE_ID),
+            "ttid": task.get("ttid", TASK_TTID),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -415,9 +474,11 @@ class CoinsFarmManager:
         try:
             res = self.checkin_mgr._call_mtop(TASK_PROCESS_COMPLETE_API, data=payload)
             if res and isinstance(res, dict):
-                return _is_task_success(res)
+                if _is_task_success(res):
+                    return True
+                logger.warning(f"[{self.account_name}] ⚠️ _complete_task для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
-            logger.debug(f"[{self.account_name}] Помилка _complete_task: {e}")
+            logger.error(f"[{self.account_name}] ❌ Виняток під час _complete_task: {e}")
 
         return False
 
@@ -441,6 +502,7 @@ class CoinsFarmManager:
             "sceneId": task.get("sceneId", TASK_SCENE_ID),
             "detailIds": "",
             "detailIdsString": detail_ids_str,
+            "ttid": task.get("ttid", TASK_TTID),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -462,8 +524,11 @@ class CoinsFarmManager:
                             if val > 0:
                                 coins = max(coins, val)
                     return coins
+                logger.warning(f"[{self.account_name}] ⚠️ _claim_task_reward для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
-            logger.debug(f"[{self.account_name}] Помилка _claim_task_reward: {e}")
+            logger.error(f"[{self.account_name}] ❌ Виняток під час _claim_task_reward: {e}")
+
+        return -1
 
         return -1
 

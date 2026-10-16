@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import hashlib
 import unittest
 from unittest.mock import patch, MagicMock
 import requests
@@ -3622,6 +3623,132 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
                 call_text = mock_post.call_args[1]["json"]["text"]
                 self.assertIn("тасок: 4", call_text)
                 self.assertIn("+40 монет", call_text)
+
+    def test_task_delivery_query_includes_ttid_in_params_and_data_and_sign(self):
+        """
+        Перевіряє, що для interactive task ендпоінтів обов'язковий параметр ttid передається:
+        1) у URL query params (params["ttid"]),
+        2) всередині JSON-пейлоаду data,
+        3) підпис sign розраховується суворо з точного рядка data.
+        """
+        from src.config import TASK_TTID
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+
+        for api in (TASK_DELIVERY_QUERY_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API):
+            params = mgr._prepare_mtop_params(api=api, data={"taskId": "test_task_123"})
+            self.assertIsNotNone(params)
+            self.assertIn("ttid", params)
+            self.assertEqual(params["ttid"], TASK_TTID)
+
+            data_obj = json.loads(params["data"])
+            self.assertIn("ttid", data_obj)
+            self.assertEqual(data_obj["ttid"], TASK_TTID)
+
+            # Перевірка строгої валідності MD5-підпису
+            expected_sign = hashlib.md5(f"mytoken123&{params['t']}&{params['appKey']}&{params['data']}".encode("utf-8")).hexdigest()
+            self.assertEqual(params["sign"], expected_sign)
+
+        # Перевірка відправки ttid у query_params під час _call_mtop
+        with patch.object(client, "post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: {"ret": ["SUCCESS::ok"], "data": {}})
+            mgr._call_mtop(TASK_DELIVERY_QUERY_API, data={"taskSceneId": 149})
+            mock_post.assert_called_once()
+            called_query_params = mock_post.call_args[1]["params"]
+            self.assertIn("ttid", called_query_params)
+            self.assertEqual(called_query_params["ttid"], TASK_TTID)
+
+    def test_task_delivery_query_error_sets_failed_status_and_skips_catalog_simulation(self):
+        """
+        Якщо mtop.aliexpress.interactive.task.delivery.query повертає помилку в ret (наприклад FAIL_SYS_BIZPARAM_MISSED),
+        скрипт повинен:
+        1) позначити етап як FAILED,
+        2) не робити фейковий обхід категорій (women-clothing.html тощо),
+        3) повернути 0 виконаних завдань.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        error_mtop_res = {
+            "api": TASK_DELIVERY_QUERY_API,
+            "data": {},
+            "ret": ["FAIL_SYS_BIZPARAM_MISSED::缺少业务参数ttid"],
+            "v": "1.0"
+        }
+
+        with patch.object(mgr, "_call_mtop", return_value=error_mtop_res), \
+             patch.object(client, "get") as mock_get:
+            done = coins.farm_browse_tasks(count=4)
+
+            self.assertEqual(done, 0)
+            self.assertEqual(coins.status, "FAILED")
+            self.assertIn("FAIL_SYS_BIZPARAM_MISSED", coins.error_message)
+
+            # Жоден GET-запит на каталог товарів/категорій не повинен викликатися!
+            for call in mock_get.call_args_list:
+                called_url = call[0][0]
+                self.assertNotIn("category", called_url)
+                self.assertNotIn("women-clothing", called_url)
+
+    def test_task_delivery_query_success_logs_and_executes_task_with_ttid(self):
+        """
+        При успішній відповіді task.delivery.query завдання виконується та передає ttid у complete/claim.
+        """
+        from src.config import TASK_TTID
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        success_mtop_res = {
+            "api": TASK_DELIVERY_QUERY_API,
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "result": [
+                    {
+                        "taskInstanceId": "inst_task_live_1",
+                        "taskTitle": "Browse items for 15s",
+                        "materials": [
+                            {
+                                "newTaskStatus": "todo",
+                                "staySeconds": 15,
+                                "actionUrl": "https://www.aliexpress.com/item/10001.html"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(client, "sleep_random"):
+
+            def mtop_side_effect(api, data=None):
+                if api == TASK_DELIVERY_QUERY_API:
+                    return success_mtop_res
+                elif api == TASK_PROCESS_COMPLETE_API:
+                    return {"ret": ["SUCCESS::调用成功"], "data": {"success": True}}
+                elif api == TASK_PROCESS_ISSUE_API:
+                    return {"ret": ["SUCCESS::调用成功"], "data": {"success": True, "awardCoins": 25}}
+                return None
+
+            mock_mtop.side_effect = mtop_side_effect
+
+            done = coins.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins.status, "SUCCESS")
+            self.assertEqual(coins.task_coins_earned, 25)
+
+            # Перевіряємо наявність ttid у викликах complete та issue
+            complete_calls = [c for c in mock_mtop.call_args_list if c[0][0] == TASK_PROCESS_COMPLETE_API]
+            self.assertTrue(len(complete_calls) > 0)
+            self.assertEqual(complete_calls[0][1]["data"]["ttid"], TASK_TTID)
+
+            issue_calls = [c for c in mock_mtop.call_args_list if c[0][0] == TASK_PROCESS_ISSUE_API]
+            self.assertTrue(len(issue_calls) > 0)
+            self.assertEqual(issue_calls[0][1]["data"]["ttid"], TASK_TTID)
+
 
 
 if __name__ == "__main__":
