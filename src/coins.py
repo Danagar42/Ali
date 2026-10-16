@@ -16,7 +16,8 @@ from src.config import (
     TASK_LOCALE,
     TASK_LANG,
     TASK_CURRENCY,
-    TASK_TTID
+    TASK_TTID,
+    TASK_PLATFORM
 )
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class CoinsFarmManager:
                         "projectAppKey": PROJECT_APP_KEY,
                         "asac": ASAC_TASK_CAMPAIGN,
                         "ttid": TASK_TTID,
+                        "platform": TASK_PLATFORM,
                         "fromNew": True,
                         "locale": TASK_LOCALE,
                         "_lang": TASK_LANG,
@@ -240,6 +242,7 @@ class CoinsFarmManager:
                             "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
                             "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
                             "ttid": it.get("ttid") or TASK_TTID,
+                            "platform": it.get("platform") or TASK_PLATFORM,
                             "raw": it
                         })
 
@@ -461,6 +464,7 @@ class CoinsFarmManager:
             "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
             "sceneId": task.get("sceneId", TASK_SCENE_ID),
             "ttid": task.get("ttid", TASK_TTID),
+            "platform": task.get("platform", TASK_PLATFORM),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -503,6 +507,7 @@ class CoinsFarmManager:
             "detailIds": "",
             "detailIdsString": detail_ids_str,
             "ttid": task.get("ttid", TASK_TTID),
+            "platform": task.get("platform", TASK_PLATFORM),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -527,8 +532,6 @@ class CoinsFarmManager:
                 logger.warning(f"[{self.account_name}] ⚠️ _claim_task_reward для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
             logger.error(f"[{self.account_name}] ❌ Виняток під час _claim_task_reward: {e}")
-
-        return -1
 
         return -1
 

@@ -139,4 +139,5 @@ TASK_LOCALE = os.getenv("TASK_LOCALE", "en_US")
 TASK_LANG = os.getenv("TASK_LANG", "en_US")
 TASK_CURRENCY = os.getenv("TASK_CURRENCY", "USD")
 TASK_TTID = os.getenv("TASK_TTID", "201200@aliexpress_android_8.100.0")
+TASK_PLATFORM = os.getenv("TASK_PLATFORM", "android")
 

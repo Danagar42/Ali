@@ -22,7 +22,8 @@ from src.config import (
     TASK_LOCALE,
     TASK_LANG,
     TASK_CURRENCY,
-    TASK_TTID
+    TASK_TTID,
+    TASK_PLATFORM
 )
 
 logger = logging.getLogger(__name__)
@@ -605,13 +606,20 @@ class CheckinManager:
             asac_val = ASAC_CAMPAIGN
 
         ttid_val = TASK_TTID if is_task_api else None
-        if isinstance(data, dict) and "ttid" in data:
-            ttid_val = str(data["ttid"])
+        platform_val = TASK_PLATFORM if is_task_api else None
+        if isinstance(data, dict):
+            if "ttid" in data:
+                ttid_val = str(data["ttid"])
+            if "platform" in data:
+                platform_val = str(data["platform"])
         elif isinstance(data, str):
             try:
                 parsed_check = json.loads(data)
-                if isinstance(parsed_check, dict) and "ttid" in parsed_check:
-                    ttid_val = str(parsed_check["ttid"])
+                if isinstance(parsed_check, dict):
+                    if "ttid" in parsed_check:
+                        ttid_val = str(parsed_check["ttid"])
+                    if "platform" in parsed_check:
+                        platform_val = str(parsed_check["platform"])
             except Exception:
                 pass
 
@@ -626,6 +634,7 @@ class CheckinManager:
                     "sceneId": TASK_SCENE_ID,
                     "asac": asac_val,
                     "ttid": ttid_val or TASK_TTID,
+                    "platform": platform_val or TASK_PLATFORM,
                     "fromNew": True,
                     "locale": TASK_LOCALE,
                     "_lang": TASK_LANG,
@@ -664,6 +673,7 @@ class CheckinManager:
             if is_task_api:
                 data_copy["asac"] = asac_val
                 data_copy.setdefault("ttid", ttid_val or TASK_TTID)
+                data_copy.setdefault("platform", platform_val or TASK_PLATFORM)
                 data_copy.setdefault("projectAppKey", PROJECT_APP_KEY)
                 data_copy.setdefault("taskAppKey", TASK_APP_KEY)
                 data_copy.setdefault("taskSceneId", TASK_SCENE_ID)
@@ -688,6 +698,7 @@ class CheckinManager:
                     if is_task_api:
                         parsed_data["asac"] = asac_val
                         parsed_data.setdefault("ttid", ttid_val or TASK_TTID)
+                        parsed_data.setdefault("platform", platform_val or TASK_PLATFORM)
                         parsed_data.setdefault("projectAppKey", PROJECT_APP_KEY)
                         parsed_data.setdefault("taskAppKey", TASK_APP_KEY)
                         parsed_data.setdefault("taskSceneId", TASK_SCENE_ID)
@@ -737,6 +748,8 @@ class CheckinManager:
         }
         if ttid_val:
             mtop_params["ttid"] = ttid_val
+        if platform_val:
+            mtop_params["platform"] = platform_val
         return mtop_params
 
     def _call_mtop(
