@@ -135,3 +135,7 @@ ASAC_TASK_CAMPAIGN = "2E247188QJLF705B9VMWWJ"
 TASK_DELIVERY_QUERY_API = "mtop.aliexpress.interactive.task.delivery.query"
 TASK_PROCESS_COMPLETE_API = "mtop.aliexpress.interactive.task.process.complete"
 TASK_PROCESS_ISSUE_API = "mtop.aliexpress.interactive.task.process.issue"
+TASK_LOCALE = os.getenv("TASK_LOCALE", "en_US")
+TASK_LANG = os.getenv("TASK_LANG", "en_US")
+TASK_CURRENCY = os.getenv("TASK_CURRENCY", "USD")
+

@@ -18,7 +18,10 @@ from src.config import (
     ASAC_TASK_CAMPAIGN,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
-    TASK_PROCESS_ISSUE_API
+    TASK_PROCESS_ISSUE_API,
+    TASK_LOCALE,
+    TASK_LANG,
+    TASK_CURRENCY
 )
 
 logger = logging.getLogger(__name__)
@@ -600,10 +603,10 @@ class CheckinManager:
         else:
             asac_val = ASAC_CAMPAIGN
 
-        if data is None:
+        if data is None or data == "" or data == {}:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
-            elif api == TASK_DELIVERY_QUERY_API:
+            elif is_task_api:
                 data_obj = {
                     "taskSceneId": TASK_SCENE_ID,
                     "taskAppKey": TASK_APP_KEY,
@@ -611,8 +614,11 @@ class CheckinManager:
                     "sceneId": TASK_SCENE_ID,
                     "asac": asac_val,
                     "fromNew": True,
-                    "_lang": "en_KR",
-                    "_currency": "USD"
+                    "locale": TASK_LOCALE,
+                    "_lang": TASK_LANG,
+                    "_currency": TASK_CURRENCY,
+                    "lang": TASK_LANG,
+                    "currency": TASK_CURRENCY
                 }
             elif api == MOBILE_SIGN_EXECUTE_API:
                 data_obj = {
@@ -649,8 +655,11 @@ class CheckinManager:
                 data_copy.setdefault("taskSceneId", TASK_SCENE_ID)
                 data_copy.setdefault("sceneId", TASK_SCENE_ID)
                 data_copy.setdefault("fromNew", True)
-                data_copy.setdefault("_lang", "en_KR")
-                data_copy.setdefault("_currency", "USD")
+                data_copy.setdefault("locale", TASK_LOCALE)
+                data_copy.setdefault("_lang", TASK_LANG)
+                data_copy.setdefault("_currency", TASK_CURRENCY)
+                data_copy.setdefault("lang", TASK_LANG)
+                data_copy.setdefault("currency", TASK_CURRENCY)
             elif is_mobile:
                 data_copy["asac"] = asac_val
                 data_copy.setdefault("_lang", "en_KR")
@@ -669,8 +678,11 @@ class CheckinManager:
                         parsed_data.setdefault("taskSceneId", TASK_SCENE_ID)
                         parsed_data.setdefault("sceneId", TASK_SCENE_ID)
                         parsed_data.setdefault("fromNew", True)
-                        parsed_data.setdefault("_lang", "en_KR")
-                        parsed_data.setdefault("_currency", "USD")
+                        parsed_data.setdefault("locale", TASK_LOCALE)
+                        parsed_data.setdefault("_lang", TASK_LANG)
+                        parsed_data.setdefault("_currency", TASK_CURRENCY)
+                        parsed_data.setdefault("lang", TASK_LANG)
+                        parsed_data.setdefault("currency", TASK_CURRENCY)
                     elif is_mobile:
                         parsed_data["asac"] = asac_val
                         parsed_data.setdefault("_lang", "en_KR")

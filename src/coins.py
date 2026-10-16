@@ -13,6 +13,9 @@ from src.config import (
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
     TASK_PROCESS_ISSUE_API,
+    TASK_LOCALE,
+    TASK_LANG,
+    TASK_CURRENCY
 )
 
 logger = logging.getLogger(__name__)
@@ -132,21 +135,37 @@ class CoinsFarmManager:
                         "projectAppKey": PROJECT_APP_KEY,
                         "asac": ASAC_TASK_CAMPAIGN,
                         "fromNew": True,
-                        "_lang": "en_KR",
-                        "_currency": "USD"
+                        "locale": TASK_LOCALE,
+                        "_lang": TASK_LANG,
+                        "_currency": TASK_CURRENCY,
+                        "lang": TASK_LANG,
+                        "currency": TASK_CURRENCY
                     }
                 )
                 if mtop_res and isinstance(mtop_res, dict):
                     raw_items = []
+                    candidate_dicts = [mtop_res]
                     data_field = mtop_res.get("data")
                     if isinstance(data_field, dict):
-                        result_field = data_field.get("result")
-                        if isinstance(result_field, list):
-                            raw_items = result_field
-                        elif isinstance(data_field.get("taskList"), list):
-                            raw_items = data_field["taskList"]
-                    elif isinstance(mtop_res.get("result"), list):
-                        raw_items = mtop_res["result"]
+                        candidate_dicts.append(data_field)
+                        if isinstance(data_field.get("data"), dict):
+                            candidate_dicts.append(data_field["data"])
+
+                    for d in candidate_dicts:
+                        for k in ("result", "taskList", "tasks", "taskDeliveryList", "deliveryList"):
+                            val = d.get(k)
+                            if isinstance(val, list) and val and isinstance(val[0], dict):
+                                raw_items = val
+                                break
+                        if raw_items:
+                            break
+
+                    if not raw_items and isinstance(data_field, list) and data_field and isinstance(data_field[0], dict):
+                        raw_items = data_field
+                    elif not raw_items and isinstance(data_field, dict) and isinstance(data_field.get("data"), list):
+                        sub_list = data_field["data"]
+                        if sub_list and isinstance(sub_list[0], dict):
+                            raw_items = sub_list
 
                     if raw_items:
                         normalized = []
@@ -156,7 +175,7 @@ class CoinsFarmManager:
                             materials = it.get("materials") or []
                             mat = materials[0] if (isinstance(materials, list) and materials and isinstance(materials[0], dict)) else {}
 
-                            task_id = it.get("taskInstanceId") or it.get("taskId") or it.get("id") or mat.get("taskInstanceId")
+                            task_id = it.get("taskInstanceId") or it.get("taskId") or it.get("id") or mat.get("taskInstanceId") or mat.get("taskId")
                             status = mat.get("newTaskStatus") or it.get("status") or ("completed" if it.get("completed") else "todo")
                             task_type = mat.get("taskType") if mat.get("taskType") is not None else it.get("taskType", 0)
                             title = mat.get("taskTitle") or mat.get("title") or it.get("taskTitle") or it.get("title") or f"Task_{task_id}"
@@ -167,13 +186,20 @@ class CoinsFarmManager:
                                 "taskId": task_id,
                                 "taskInstanceId": task_id,
                                 "taskAppKey": it.get("taskAppKey") or TASK_APP_KEY,
+                                "projectAppKey": it.get("projectAppKey") or PROJECT_APP_KEY,
                                 "taskSceneId": it.get("taskSceneId") or TASK_SCENE_ID,
+                                "sceneId": it.get("sceneId") or TASK_SCENE_ID,
                                 "taskType": task_type,
                                 "taskTitle": title,
                                 "status": str(status).lower(),
                                 "unIssueRecord": un_issue,
                                 "staySeconds": _clean_int(mat.get("staySeconds")) or 15,
                                 "actionUrl": action_url,
+                                "locale": it.get("locale") or TASK_LOCALE,
+                                "_lang": it.get("_lang") or TASK_LANG,
+                                "_currency": it.get("_currency") or TASK_CURRENCY,
+                                "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
+                                "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
                                 "raw": it
                             })
 
@@ -379,8 +405,11 @@ class CoinsFarmManager:
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
-            "_lang": "en_KR",
-            "_currency": "USD"
+            "locale": task.get("locale", TASK_LOCALE),
+            "_lang": task.get("_lang", TASK_LANG),
+            "_currency": task.get("_currency", TASK_CURRENCY),
+            "lang": task.get("lang", task.get("_lang", TASK_LANG)),
+            "currency": task.get("currency", task.get("_currency", TASK_CURRENCY))
         }
 
         try:
@@ -408,13 +437,18 @@ class CoinsFarmManager:
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
             "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
+            "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
+            "sceneId": task.get("sceneId", TASK_SCENE_ID),
             "detailIds": "",
             "detailIdsString": detail_ids_str,
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
-            "_lang": "en_KR",
-            "_currency": "USD"
+            "locale": task.get("locale", TASK_LOCALE),
+            "_lang": task.get("_lang", TASK_LANG),
+            "_currency": task.get("_currency", TASK_CURRENCY),
+            "lang": task.get("lang", task.get("_lang", TASK_LANG)),
+            "currency": task.get("currency", task.get("_currency", TASK_CURRENCY))
         }
 
         try:

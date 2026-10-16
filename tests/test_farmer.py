@@ -15,7 +15,10 @@ from src.config import (
     PROJECT_APP_KEY,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
-    TASK_PROCESS_ISSUE_API
+    TASK_PROCESS_ISSUE_API,
+    TASK_LOCALE,
+    TASK_LANG,
+    TASK_CURRENCY
 )
 from src.auth import (
     parse_cookie_string,
@@ -3309,7 +3312,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             }
         }
 
-        with patch.object(checkin_mgr, "_call_mtop", return_value=mock_delivery_response):
+        with patch.object(checkin_mgr, "_call_mtop", return_value=mock_delivery_response) as mock_call:
             tasks = coins_mgr.fetch_active_tasks()
             self.assertEqual(len(tasks), 1)
             t = tasks[0]
@@ -3318,6 +3321,12 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(t["staySeconds"], 15)
             self.assertEqual(t["status"], "todo")
             self.assertEqual(t["actionUrl"], "https://www.aliexpress.com/p/coin-pc-index/index.html")
+
+            mock_call.assert_called_once()
+            call_data = mock_call.call_args[1]["data"]
+            self.assertEqual(call_data["locale"], "en_US")
+            self.assertEqual(call_data["_lang"], "en_US")
+            self.assertEqual(call_data["_currency"], "USD")
 
     def test_farm_browse_tasks_executes_safe_browse_with_15s_and_claims_coins(self):
         client = AliClient(cookies={"_m_h5_tk": "tk123"})
@@ -3419,10 +3428,16 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             call1_args = mock_call.call_args_list[0]
             self.assertEqual(call1_args[0][0], "mtop.aliexpress.interactive.task.process.complete")
             self.assertEqual(call1_args[1]["data"]["taskInstanceId"], "inst_555")
+            self.assertEqual(call1_args[1]["data"]["locale"], "en_US")
+            self.assertEqual(call1_args[1]["data"]["_lang"], "en_US")
+            self.assertEqual(call1_args[1]["data"]["_currency"], "USD")
 
             call2_args = mock_call.call_args_list[1]
             self.assertEqual(call2_args[0][0], "mtop.aliexpress.interactive.task.process.issue")
             self.assertEqual(call2_args[1]["data"]["taskInstanceId"], "inst_555")
+            self.assertEqual(call2_args[1]["data"]["locale"], "en_US")
+            self.assertEqual(call2_args[1]["data"]["_lang"], "en_US")
+            self.assertEqual(call2_args[1]["data"]["_currency"], "USD")
             self.assertIn("rec_abc", call2_args[1]["data"]["detailIdsString"])
 
     def test_main_accumulates_task_coins_into_summary(self):
@@ -3468,8 +3483,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             params_dict = mgr._prepare_mtop_params(api=api, data={"taskId": "123"})
             self.assertIsNotNone(params_dict)
             data_obj = json.loads(params_dict["data"])
-            self.assertEqual(data_obj.get("_lang"), "en_KR")
+            self.assertEqual(data_obj.get("locale"), "en_US")
+            self.assertEqual(data_obj.get("_lang"), "en_US")
             self.assertEqual(data_obj.get("_currency"), "USD")
+            self.assertEqual(data_obj.get("lang"), "en_US")
+            self.assertEqual(data_obj.get("currency"), "USD")
             self.assertEqual(data_obj.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj.get("projectAppKey"), PROJECT_APP_KEY)
             self.assertEqual(data_obj.get("sceneId"), 149)
@@ -3478,21 +3496,111 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             params_str = mgr._prepare_mtop_params(api=api, data=json.dumps({"taskId": "123"}))
             self.assertIsNotNone(params_str)
             data_obj2 = json.loads(params_str["data"])
-            self.assertEqual(data_obj2.get("_lang"), "en_KR")
+            self.assertEqual(data_obj2.get("locale"), "en_US")
+            self.assertEqual(data_obj2.get("_lang"), "en_US")
             self.assertEqual(data_obj2.get("_currency"), "USD")
+            self.assertEqual(data_obj2.get("lang"), "en_US")
+            self.assertEqual(data_obj2.get("currency"), "USD")
             self.assertEqual(data_obj2.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj2.get("projectAppKey"), PROJECT_APP_KEY)
             self.assertEqual(data_obj2.get("sceneId"), 149)
 
-        # Test None data for TASK_DELIVERY_QUERY_API
-        params_none = mgr._prepare_mtop_params(api=TASK_DELIVERY_QUERY_API, data=None)
-        self.assertIsNotNone(params_none)
-        data_none_obj = json.loads(params_none["data"])
-        self.assertEqual(data_none_obj.get("_lang"), "en_KR")
-        self.assertEqual(data_none_obj.get("_currency"), "USD")
-        self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
-        self.assertEqual(data_none_obj.get("projectAppKey"), PROJECT_APP_KEY)
-        self.assertEqual(data_none_obj.get("sceneId"), 149)
+            # Test None data for ALL interactive task APIs
+            params_none = mgr._prepare_mtop_params(api=api, data=None)
+            self.assertIsNotNone(params_none)
+            data_none_obj = json.loads(params_none["data"])
+            self.assertEqual(data_none_obj.get("locale"), "en_US")
+            self.assertEqual(data_none_obj.get("_lang"), "en_US")
+            self.assertEqual(data_none_obj.get("_currency"), "USD")
+            self.assertEqual(data_none_obj.get("lang"), "en_US")
+            self.assertEqual(data_none_obj.get("currency"), "USD")
+            self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
+            self.assertEqual(data_none_obj.get("projectAppKey"), PROJECT_APP_KEY)
+            self.assertEqual(data_none_obj.get("sceneId"), 149)
+
+            # Test empty dict and empty string
+            for empty_val in ({}, ""):
+                params_empty = mgr._prepare_mtop_params(api=api, data=empty_val)
+                self.assertIsNotNone(params_empty)
+                data_empty_obj = json.loads(params_empty["data"])
+                self.assertEqual(data_empty_obj.get("locale"), "en_US")
+                self.assertEqual(data_empty_obj.get("_lang"), "en_US")
+                self.assertEqual(data_empty_obj.get("_currency"), "USD")
+                self.assertEqual(data_empty_obj.get("lang"), "en_US")
+                self.assertEqual(data_empty_obj.get("currency"), "USD")
+
+    def test_task_delivery_query_includes_required_locale_param(self):
+        """Перевіряє, що запити до інтерактивної платформи завдань завжди мають обов'язковий бізнес-параметр locale."""
+        client = AliClient(cookies={"_m_h5_tk": "mytoken_123"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        with patch.object(mgr, "_call_mtop", return_value={"data": {"result": []}}) as mock_call:
+            coins.fetch_active_tasks()
+            mock_call.assert_called_once()
+            call_api, call_kwargs = mock_call.call_args[0][0], mock_call.call_args[1]
+            self.assertEqual(call_api, TASK_DELIVERY_QUERY_API)
+            payload = call_kwargs["data"]
+            self.assertEqual(payload["locale"], "en_US")
+            self.assertEqual(payload["_lang"], "en_US")
+            self.assertEqual(payload["_currency"], "USD")
+            self.assertEqual(payload["lang"], "en_US")
+            self.assertEqual(payload["currency"], "USD")
+            self.assertEqual(payload["taskSceneId"], 149)
+            self.assertEqual(payload["sceneId"], 149)
+            self.assertTrue(payload["fromNew"])
+
+    def test_fetch_active_tasks_nested_mtop_structure_and_custom_locale(self):
+        """Перевіряє коректний парсинг вкладених структур JSON (data.data.result) та збереження кастомного locale."""
+        client = AliClient(cookies={"_m_h5_tk": "mytoken_nested_123"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        mock_nested_res = {
+            "api": TASK_DELIVERY_QUERY_API,
+            "data": {
+                "success": True,
+                "data": {
+                    "result": [
+                        {
+                            "taskInstanceId": "inst_custom_777",
+                            "taskTitle": "Browse specialized catalog",
+                            "locale": "en_KR",
+                            "_lang": "en_KR",
+                            "materials": [
+                                {
+                                    "newTaskStatus": "todo",
+                                    "staySeconds": 15,
+                                    "actionUrl": "https://aliexpress.com/p/special.html"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop", return_value=mock_nested_res):
+            tasks = coins.fetch_active_tasks()
+            self.assertEqual(len(tasks), 1)
+            t = tasks[0]
+            self.assertEqual(t["taskInstanceId"], "inst_custom_777")
+            self.assertEqual(t["locale"], "en_KR")
+            self.assertEqual(t["_lang"], "en_KR")
+
+        # Перевірка передачі кастомного locale у _complete_task та _claim_task_reward
+        with patch.object(mgr, "_call_mtop", return_value={"data": {"success": True, "awardCoins": 25}}) as mock_call:
+            ok = coins._complete_task(t)
+            self.assertTrue(ok)
+            complete_payload = mock_call.call_args[1]["data"]
+            self.assertEqual(complete_payload["locale"], "en_KR")
+            self.assertEqual(complete_payload["_lang"], "en_KR")
+
+            claimed = coins._claim_task_reward(t)
+            self.assertEqual(claimed, 25)
+            claim_payload = mock_call.call_args[1]["data"]
+            self.assertEqual(claim_payload["locale"], "en_KR")
+            self.assertEqual(claim_payload["_lang"], "en_KR")
 
     def test_notifications_telegram_includes_tasks_done(self):
         from src.notifications import NotificationDispatcher, AccountSummary
