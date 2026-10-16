@@ -14,6 +14,7 @@ from src.config import (
     ORIGIN,
     TASK_SCENE_ID,
     TASK_APP_KEY,
+    PROJECT_APP_KEY,
     ASAC_TASK_CAMPAIGN,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
@@ -606,6 +607,8 @@ class CheckinManager:
                 data_obj = {
                     "taskSceneId": TASK_SCENE_ID,
                     "taskAppKey": TASK_APP_KEY,
+                    "projectAppKey": PROJECT_APP_KEY,
+                    "sceneId": TASK_SCENE_ID,
                     "asac": asac_val,
                     "fromNew": True,
                     "_lang": "en_KR",
@@ -639,7 +642,16 @@ class CheckinManager:
             data_str = json.dumps(data_obj, separators=(",", ":"))
         elif isinstance(data, dict):
             data_copy = dict(data)
-            if is_mobile:
+            if is_task_api:
+                data_copy["asac"] = asac_val
+                data_copy.setdefault("projectAppKey", PROJECT_APP_KEY)
+                data_copy.setdefault("taskAppKey", TASK_APP_KEY)
+                data_copy.setdefault("taskSceneId", TASK_SCENE_ID)
+                data_copy.setdefault("sceneId", TASK_SCENE_ID)
+                data_copy.setdefault("fromNew", True)
+                data_copy.setdefault("_lang", "en_KR")
+                data_copy.setdefault("_currency", "USD")
+            elif is_mobile:
                 data_copy["asac"] = asac_val
                 data_copy.setdefault("_lang", "en_KR")
                 data_copy.setdefault("_currency", "USD")
@@ -650,7 +662,16 @@ class CheckinManager:
             try:
                 parsed_data = json.loads(data)
                 if isinstance(parsed_data, dict):
-                    if is_mobile:
+                    if is_task_api:
+                        parsed_data["asac"] = asac_val
+                        parsed_data.setdefault("projectAppKey", PROJECT_APP_KEY)
+                        parsed_data.setdefault("taskAppKey", TASK_APP_KEY)
+                        parsed_data.setdefault("taskSceneId", TASK_SCENE_ID)
+                        parsed_data.setdefault("sceneId", TASK_SCENE_ID)
+                        parsed_data.setdefault("fromNew", True)
+                        parsed_data.setdefault("_lang", "en_KR")
+                        parsed_data.setdefault("_currency", "USD")
+                    elif is_mobile:
                         parsed_data["asac"] = asac_val
                         parsed_data.setdefault("_lang", "en_KR")
                         parsed_data.setdefault("_currency", "USD")

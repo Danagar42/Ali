@@ -12,6 +12,7 @@ from src.config import (
     get_random_user_agent,
     ASAC_MOBILE_CAMPAIGN,
     ASAC_TASK_CAMPAIGN,
+    PROJECT_APP_KEY,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
     TASK_PROCESS_ISSUE_API
@@ -3470,6 +3471,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(data_obj.get("_lang"), "en_KR")
             self.assertEqual(data_obj.get("_currency"), "USD")
             self.assertEqual(data_obj.get("asac"), ASAC_TASK_CAMPAIGN)
+            self.assertEqual(data_obj.get("projectAppKey"), PROJECT_APP_KEY)
+            self.assertEqual(data_obj.get("sceneId"), 149)
 
             # Test string data
             params_str = mgr._prepare_mtop_params(api=api, data=json.dumps({"taskId": "123"}))
@@ -3478,6 +3481,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(data_obj2.get("_lang"), "en_KR")
             self.assertEqual(data_obj2.get("_currency"), "USD")
             self.assertEqual(data_obj2.get("asac"), ASAC_TASK_CAMPAIGN)
+            self.assertEqual(data_obj2.get("projectAppKey"), PROJECT_APP_KEY)
+            self.assertEqual(data_obj2.get("sceneId"), 149)
 
         # Test None data for TASK_DELIVERY_QUERY_API
         params_none = mgr._prepare_mtop_params(api=TASK_DELIVERY_QUERY_API, data=None)
@@ -3486,6 +3491,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
         self.assertEqual(data_none_obj.get("_lang"), "en_KR")
         self.assertEqual(data_none_obj.get("_currency"), "USD")
         self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
+        self.assertEqual(data_none_obj.get("projectAppKey"), PROJECT_APP_KEY)
+        self.assertEqual(data_none_obj.get("sceneId"), 149)
 
     def test_notifications_telegram_includes_tasks_done(self):
         from src.notifications import NotificationDispatcher, AccountSummary

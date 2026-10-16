@@ -8,6 +8,7 @@ from src.checkin import CheckinManager, _collect_nested_dicts, _clean_int
 from src.config import (
     TASK_SCENE_ID,
     TASK_APP_KEY,
+    PROJECT_APP_KEY,
     ASAC_TASK_CAMPAIGN,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
@@ -126,7 +127,9 @@ class CoinsFarmManager:
                     TASK_DELIVERY_QUERY_API,
                     data={
                         "taskSceneId": TASK_SCENE_ID,
+                        "sceneId": TASK_SCENE_ID,
                         "taskAppKey": TASK_APP_KEY,
+                        "projectAppKey": PROJECT_APP_KEY,
                         "asac": ASAC_TASK_CAMPAIGN,
                         "fromNew": True,
                         "_lang": "en_KR",
@@ -370,7 +373,9 @@ class CoinsFarmManager:
         payload = {
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
+            "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
             "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
+            "sceneId": task.get("sceneId", TASK_SCENE_ID),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -401,6 +406,8 @@ class CoinsFarmManager:
 
         payload = {
             "taskInstanceId": task_id,
+            "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
+            "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
             "detailIds": "",
             "detailIdsString": detail_ids_str,
             "fromNew": True,
