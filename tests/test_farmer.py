@@ -10,7 +10,11 @@ from src.config import (
     get_random_browser_profile,
     get_client_hints_for_ua,
     get_random_user_agent,
-    ASAC_MOBILE_CAMPAIGN
+    ASAC_MOBILE_CAMPAIGN,
+    ASAC_TASK_CAMPAIGN,
+    TASK_DELIVERY_QUERY_API,
+    TASK_PROCESS_COMPLETE_API,
+    TASK_PROCESS_ISSUE_API
 )
 from src.auth import (
     parse_cookie_string,
@@ -3454,6 +3458,55 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(summary.coins_earned, 55)  # 25 (checkin) + 30 (tasks)
             self.assertEqual(summary.total_coins, 430)  # 400 (checkin balance) + 30 (task coins)
             self.assertEqual(summary.tasks_done, 2)
+
+    def test_prepare_mtop_params_interactive_task_endpoints_contain_lang_and_currency(self):
+        client = AliClient(cookies={"_m_h5_tk": "testtoken_123"})
+        mgr = CheckinManager(client)
+        for api in (TASK_DELIVERY_QUERY_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API):
+            # Test dict data
+            params_dict = mgr._prepare_mtop_params(api=api, data={"taskId": "123"})
+            self.assertIsNotNone(params_dict)
+            data_obj = json.loads(params_dict["data"])
+            self.assertEqual(data_obj.get("_lang"), "en_KR")
+            self.assertEqual(data_obj.get("_currency"), "USD")
+            self.assertEqual(data_obj.get("asac"), ASAC_TASK_CAMPAIGN)
+
+            # Test string data
+            params_str = mgr._prepare_mtop_params(api=api, data=json.dumps({"taskId": "123"}))
+            self.assertIsNotNone(params_str)
+            data_obj2 = json.loads(params_str["data"])
+            self.assertEqual(data_obj2.get("_lang"), "en_KR")
+            self.assertEqual(data_obj2.get("_currency"), "USD")
+            self.assertEqual(data_obj2.get("asac"), ASAC_TASK_CAMPAIGN)
+
+        # Test None data for TASK_DELIVERY_QUERY_API
+        params_none = mgr._prepare_mtop_params(api=TASK_DELIVERY_QUERY_API, data=None)
+        self.assertIsNotNone(params_none)
+        data_none_obj = json.loads(params_none["data"])
+        self.assertEqual(data_none_obj.get("_lang"), "en_KR")
+        self.assertEqual(data_none_obj.get("_currency"), "USD")
+        self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
+
+    def test_notifications_telegram_includes_tasks_done(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123456:FAKE_TOKEN", "TELEGRAM_CHAT_ID": "987654"}):
+            dispatcher = NotificationDispatcher()
+            dispatcher.add_summary(AccountSummary(
+                name="Account_1",
+                checkin_status="SUCCESS",
+                coins_earned=40,
+                streak_days=7,
+                tasks_done=4
+            ))
+
+            with patch("requests.post") as mock_post:
+                mock_post.return_value.status_code = 200
+                res = dispatcher.send_telegram_notification()
+                self.assertTrue(res)
+                mock_post.assert_called_once()
+                call_text = mock_post.call_args[1]["json"]["text"]
+                self.assertIn("тасок: 4", call_text)
+                self.assertIn("+40 монет", call_text)
 
 
 if __name__ == "__main__":

@@ -177,6 +177,8 @@ class NotificationDispatcher:
                 detail += f", стрік {s.streak_days} дн."
             if s.coins_earned > 0:
                 detail += f", +{s.coins_earned} монет"
+            if s.tasks_done > 0:
+                detail += f", тасок: {s.tasks_done}"
             if not s.session_valid:
                 detail += " (СЕСІЯ ПРОСТРОЧЕНА!)"
             if s.error_message:

@@ -607,7 +607,9 @@ class CheckinManager:
                     "taskSceneId": TASK_SCENE_ID,
                     "taskAppKey": TASK_APP_KEY,
                     "asac": asac_val,
-                    "fromNew": True
+                    "fromNew": True,
+                    "_lang": "en_KR",
+                    "_currency": "USD"
                 }
             elif api == MOBILE_SIGN_EXECUTE_API:
                 data_obj = {
@@ -639,6 +641,8 @@ class CheckinManager:
             data_copy = dict(data)
             if is_mobile:
                 data_copy["asac"] = asac_val
+                data_copy.setdefault("_lang", "en_KR")
+                data_copy.setdefault("_currency", "USD")
             elif "asac" not in data_copy and api != "mtop.aliexpress.coin.execute":
                 data_copy["asac"] = asac_val
             data_str = json.dumps(data_copy, separators=(",", ":"))
@@ -648,6 +652,8 @@ class CheckinManager:
                 if isinstance(parsed_data, dict):
                     if is_mobile:
                         parsed_data["asac"] = asac_val
+                        parsed_data.setdefault("_lang", "en_KR")
+                        parsed_data.setdefault("_currency", "USD")
                     elif "asac" not in parsed_data and api != "mtop.aliexpress.coin.execute":
                         parsed_data["asac"] = asac_val
                     data_str = json.dumps(parsed_data, separators=(",", ":"))

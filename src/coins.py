@@ -128,7 +128,9 @@ class CoinsFarmManager:
                         "taskSceneId": TASK_SCENE_ID,
                         "taskAppKey": TASK_APP_KEY,
                         "asac": ASAC_TASK_CAMPAIGN,
-                        "fromNew": True
+                        "fromNew": True,
+                        "_lang": "en_KR",
+                        "_currency": "USD"
                     }
                 )
                 if mtop_res and isinstance(mtop_res, dict):
@@ -371,7 +373,9 @@ class CoinsFarmManager:
             "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
-            "idemId": str(int(time.time() * 1000))
+            "idemId": str(int(time.time() * 1000)),
+            "_lang": "en_KR",
+            "_currency": "USD"
         }
 
         try:
@@ -401,7 +405,9 @@ class CoinsFarmManager:
             "detailIdsString": detail_ids_str,
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
-            "idemId": str(int(time.time() * 1000))
+            "idemId": str(int(time.time() * 1000)),
+            "_lang": "en_KR",
+            "_currency": "USD"
         }
 
         try:
