@@ -138,10 +138,13 @@ ASAC_TASK_CAMPAIGN = os.getenv("ASAC_TASK_CAMPAIGN", "2E247188QJLF705B9VMWWJ")
 TASK_DELIVERY_QUERY_API = "mtop.aliexpress.interactive.task.delivery.query"
 TASK_PROCESS_COMPLETE_API = "mtop.aliexpress.interactive.task.process.complete"
 TASK_PROCESS_ISSUE_API = "mtop.aliexpress.interactive.task.process.issue"
-TASK_LOCALE = os.getenv("TASK_LOCALE", "en_US")
+TASK_LOCALE = os.getenv("TASK_LOCALE", "UA")
 TASK_LANG = os.getenv("TASK_LANG", "en_US")
-TASK_CURRENCY = os.getenv("TASK_CURRENCY", "USD")
-TASK_TTID = os.getenv("TASK_TTID", "201200@aliexpress_android_8.100.0")
+TASK_CURRENCY = os.getenv("TASK_CURRENCY", "UAH")
+TASK_TTID = os.getenv("TASK_TTID", "@ae_msite_1")
 TASK_PLATFORM = os.getenv("TASK_PLATFORM", "android")
+TASK_UMID_TOKEN = os.getenv("TASK_UMID_TOKEN", "T2gA1jIALVYecdoa1onvC24McgCfk9c4nhceoLAzw36kxqGPO6h_HOQJGtmoGclimx8=")
+TASK_BX_UMIDTOKEN = os.getenv("TASK_BX_UMIDTOKEN", "T2gAJf8iJkyJCy1iYOyIw3Mx_GChuoEw_ds8gFo3GJfC_qzqm2SJRF4_f2cB9u2NtoI=")
+TASK_MTOP_APP_KEY = os.getenv("TASK_MTOP_APP_KEY", "24815441")
 TASK_PLATFORM_CANDIDATES = ["android", "wireless", "h5", "app", "iOS"]
 

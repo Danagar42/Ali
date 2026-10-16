@@ -2,7 +2,8 @@ import logging
 import random
 import time
 import json
-from typing import List, Dict, Any, Optional, Set
+import re
+from typing import List, Dict, Any, Optional, Set, Tuple
 from src.client import AliClient
 from src.checkin import CheckinManager, _collect_nested_dicts, _clean_int
 from src.config import (
@@ -18,7 +19,8 @@ from src.config import (
     TASK_CURRENCY,
     TASK_TTID,
     TASK_PLATFORM,
-    TASK_PLATFORM_CANDIDATES
+    TASK_PLATFORM_CANDIDATES,
+    TASK_UMID_TOKEN
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,15 @@ def _is_no_group_match(res: Any) -> bool:
     return False
 
 
+def _extract_user_locale_params(client: Optional[AliClient] = None) -> Tuple[str, str, str]:
+    """
+    Визначає (locale, currency, lang) для запитів завдань.
+    За замовчуванням для України обов'язково використовує locale="UA", _currency="UAH", _lang="en_US"
+    (з конфігурації TASK_LOCALE, TASK_CURRENCY, TASK_LANG).
+    """
+    return TASK_LOCALE, TASK_CURRENCY, TASK_LANG
+
+
 class CoinsFarmManager:
     """
     Керує безпечним фармом монет за завдання (Coin Tasks):
@@ -160,23 +171,29 @@ class CoinsFarmManager:
                 working_platform: Optional[str] = None
                 all_no_group_match = True
 
+                locale, currency, lang = _extract_user_locale_params(self.client)
+                ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
+
                 for platform_candidate in candidate_platforms:
                     res = self.checkin_mgr._call_mtop(
                         TASK_DELIVERY_QUERY_API,
                         data={
-                            "taskSceneId": TASK_SCENE_ID,
-                            "sceneId": TASK_SCENE_ID,
-                            "taskAppKey": TASK_APP_KEY,
-                            "projectAppKey": PROJECT_APP_KEY,
-                            "asac": ASAC_TASK_CAMPAIGN,
+                            "ua": ua_val,
+                            "umidToken": TASK_UMID_TOKEN,
+                            "umidTokenType": "TOKEN",
+                            "_lang": lang,
+                            "_currency": currency,
+                            "lang": lang,
+                            "currency": currency,
+                            "locale": locale,
                             "ttid": TASK_TTID,
                             "platform": platform_candidate,
-                            "fromNew": True,
-                            "locale": TASK_LOCALE,
-                            "_lang": TASK_LANG,
-                            "_currency": TASK_CURRENCY,
-                            "lang": TASK_LANG,
-                            "currency": TASK_CURRENCY
+                            "sceneId": TASK_SCENE_ID,
+                            "taskSceneId": TASK_SCENE_ID,
+                            "projectAppKey": PROJECT_APP_KEY,
+                            "taskAppKey": TASK_APP_KEY,
+                            "asac": ASAC_TASK_CAMPAIGN,
+                            "fromNew": True
                         }
                     )
                     if not res or not isinstance(res, dict):
@@ -291,11 +308,11 @@ class CoinsFarmManager:
                             "unIssueRecord": un_issue,
                             "staySeconds": _clean_int(mat.get("staySeconds")) or 15,
                             "actionUrl": action_url,
-                            "locale": it.get("locale") or TASK_LOCALE,
-                            "_lang": it.get("_lang") or TASK_LANG,
-                            "_currency": it.get("_currency") or TASK_CURRENCY,
-                            "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
-                            "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
+                            "locale": it.get("locale") or locale,
+                            "_lang": it.get("_lang") or lang,
+                            "_currency": it.get("_currency") or currency,
+                            "lang": it.get("lang") or it.get("_lang") or lang,
+                            "currency": it.get("currency") or it.get("_currency") or currency,
                             "ttid": it.get("ttid") or TASK_TTID,
                             "platform": it.get("platform") or working_platform or TASK_PLATFORM,
                             "raw": it
@@ -515,8 +532,13 @@ class CoinsFarmManager:
         if not task_id:
             return False
 
+        locale, currency, lang = _extract_user_locale_params(self.client)
         task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
+        ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
         payload = {
+            "ua": ua_val,
+            "umidToken": TASK_UMID_TOKEN,
+            "umidTokenType": "TOKEN",
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
             "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
@@ -527,11 +549,11 @@ class CoinsFarmManager:
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
-            "locale": task.get("locale", TASK_LOCALE),
-            "_lang": task.get("_lang", TASK_LANG),
-            "_currency": task.get("_currency", TASK_CURRENCY),
-            "lang": task.get("lang", task.get("_lang", TASK_LANG)),
-            "currency": task.get("currency", task.get("_currency", TASK_CURRENCY))
+            "locale": task.get("locale", locale),
+            "_lang": task.get("_lang", lang),
+            "_currency": task.get("_currency", currency),
+            "lang": task.get("lang", task.get("_lang", lang)),
+            "currency": task.get("currency", task.get("_currency", currency))
         }
 
         try:
@@ -557,8 +579,13 @@ class CoinsFarmManager:
         un_issue = task.get("unIssueRecord")
         detail_ids_str = json.dumps(un_issue) if isinstance(un_issue, (list, dict)) else str(un_issue or "")
 
+        locale, currency, lang = _extract_user_locale_params(self.client)
         task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
+        ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
         payload = {
+            "ua": ua_val,
+            "umidToken": TASK_UMID_TOKEN,
+            "umidTokenType": "TOKEN",
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
             "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
@@ -571,11 +598,11 @@ class CoinsFarmManager:
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
-            "locale": task.get("locale", TASK_LOCALE),
-            "_lang": task.get("_lang", TASK_LANG),
-            "_currency": task.get("_currency", TASK_CURRENCY),
-            "lang": task.get("lang", task.get("_lang", TASK_LANG)),
-            "currency": task.get("currency", task.get("_currency", TASK_CURRENCY))
+            "locale": task.get("locale", locale),
+            "_lang": task.get("_lang", lang),
+            "_currency": task.get("_currency", currency),
+            "lang": task.get("lang", task.get("_lang", lang)),
+            "currency": task.get("currency", task.get("_currency", currency))
         }
 
         try:

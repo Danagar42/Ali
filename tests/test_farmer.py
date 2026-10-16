@@ -21,7 +21,10 @@ from src.config import (
     TASK_LANG,
     TASK_CURRENCY,
     TASK_TTID,
-    TASK_PLATFORM
+    TASK_PLATFORM,
+    TASK_UMID_TOKEN,
+    TASK_BX_UMIDTOKEN,
+    TASK_MTOP_APP_KEY
 )
 from src.auth import (
     parse_cookie_string,
@@ -3327,9 +3330,9 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
 
             mock_call.assert_called_once()
             call_data = mock_call.call_args[1]["data"]
-            self.assertEqual(call_data["locale"], "en_US")
+            self.assertEqual(call_data["locale"], "UA")
             self.assertEqual(call_data["_lang"], "en_US")
-            self.assertEqual(call_data["_currency"], "USD")
+            self.assertEqual(call_data["_currency"], "UAH")
 
     def test_farm_browse_tasks_executes_safe_browse_with_15s_and_claims_coins(self):
         client = AliClient(cookies={"_m_h5_tk": "tk123"})
@@ -3431,16 +3434,16 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             call1_args = mock_call.call_args_list[0]
             self.assertEqual(call1_args[0][0], "mtop.aliexpress.interactive.task.process.complete")
             self.assertEqual(call1_args[1]["data"]["taskInstanceId"], "inst_555")
-            self.assertEqual(call1_args[1]["data"]["locale"], "en_US")
+            self.assertEqual(call1_args[1]["data"]["locale"], "UA")
             self.assertEqual(call1_args[1]["data"]["_lang"], "en_US")
-            self.assertEqual(call1_args[1]["data"]["_currency"], "USD")
+            self.assertEqual(call1_args[1]["data"]["_currency"], "UAH")
 
             call2_args = mock_call.call_args_list[1]
             self.assertEqual(call2_args[0][0], "mtop.aliexpress.interactive.task.process.issue")
             self.assertEqual(call2_args[1]["data"]["taskInstanceId"], "inst_555")
-            self.assertEqual(call2_args[1]["data"]["locale"], "en_US")
+            self.assertEqual(call2_args[1]["data"]["locale"], "UA")
             self.assertEqual(call2_args[1]["data"]["_lang"], "en_US")
-            self.assertEqual(call2_args[1]["data"]["_currency"], "USD")
+            self.assertEqual(call2_args[1]["data"]["_currency"], "UAH")
             self.assertIn("rec_abc", call2_args[1]["data"]["detailIdsString"])
 
     def test_main_accumulates_task_coins_into_summary(self):
@@ -3486,11 +3489,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             params_dict = mgr._prepare_mtop_params(api=api, data={"taskId": "123"})
             self.assertIsNotNone(params_dict)
             data_obj = json.loads(params_dict["data"])
-            self.assertEqual(data_obj.get("locale"), "en_US")
+            self.assertEqual(data_obj.get("locale"), "UA")
             self.assertEqual(data_obj.get("_lang"), "en_US")
-            self.assertEqual(data_obj.get("_currency"), "USD")
+            self.assertEqual(data_obj.get("_currency"), "UAH")
             self.assertEqual(data_obj.get("lang"), "en_US")
-            self.assertEqual(data_obj.get("currency"), "USD")
+            self.assertEqual(data_obj.get("currency"), "UAH")
             self.assertEqual(data_obj.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj.get("projectAppKey"), PROJECT_APP_KEY)
             self.assertEqual(data_obj.get("sceneId"), 149)
@@ -3499,11 +3502,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             params_str = mgr._prepare_mtop_params(api=api, data=json.dumps({"taskId": "123"}))
             self.assertIsNotNone(params_str)
             data_obj2 = json.loads(params_str["data"])
-            self.assertEqual(data_obj2.get("locale"), "en_US")
+            self.assertEqual(data_obj2.get("locale"), "UA")
             self.assertEqual(data_obj2.get("_lang"), "en_US")
-            self.assertEqual(data_obj2.get("_currency"), "USD")
+            self.assertEqual(data_obj2.get("_currency"), "UAH")
             self.assertEqual(data_obj2.get("lang"), "en_US")
-            self.assertEqual(data_obj2.get("currency"), "USD")
+            self.assertEqual(data_obj2.get("currency"), "UAH")
             self.assertEqual(data_obj2.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj2.get("projectAppKey"), PROJECT_APP_KEY)
             self.assertEqual(data_obj2.get("sceneId"), 149)
@@ -3512,11 +3515,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             params_none = mgr._prepare_mtop_params(api=api, data=None)
             self.assertIsNotNone(params_none)
             data_none_obj = json.loads(params_none["data"])
-            self.assertEqual(data_none_obj.get("locale"), "en_US")
+            self.assertEqual(data_none_obj.get("locale"), "UA")
             self.assertEqual(data_none_obj.get("_lang"), "en_US")
-            self.assertEqual(data_none_obj.get("_currency"), "USD")
+            self.assertEqual(data_none_obj.get("_currency"), "UAH")
             self.assertEqual(data_none_obj.get("lang"), "en_US")
-            self.assertEqual(data_none_obj.get("currency"), "USD")
+            self.assertEqual(data_none_obj.get("currency"), "UAH")
             self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_none_obj.get("projectAppKey"), PROJECT_APP_KEY)
             self.assertEqual(data_none_obj.get("sceneId"), 149)
@@ -3526,11 +3529,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
                 params_empty = mgr._prepare_mtop_params(api=api, data=empty_val)
                 self.assertIsNotNone(params_empty)
                 data_empty_obj = json.loads(params_empty["data"])
-                self.assertEqual(data_empty_obj.get("locale"), "en_US")
+                self.assertEqual(data_empty_obj.get("locale"), "UA")
                 self.assertEqual(data_empty_obj.get("_lang"), "en_US")
-                self.assertEqual(data_empty_obj.get("_currency"), "USD")
+                self.assertEqual(data_empty_obj.get("_currency"), "UAH")
                 self.assertEqual(data_empty_obj.get("lang"), "en_US")
-                self.assertEqual(data_empty_obj.get("currency"), "USD")
+                self.assertEqual(data_empty_obj.get("currency"), "UAH")
 
     def test_task_delivery_query_includes_required_locale_param(self):
         """Перевіряє, що запити до інтерактивної платформи завдань завжди мають обов'язковий бізнес-параметр locale."""
@@ -3544,11 +3547,11 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             call_api, call_kwargs = mock_call.call_args[0][0], mock_call.call_args[1]
             self.assertEqual(call_api, TASK_DELIVERY_QUERY_API)
             payload = call_kwargs["data"]
-            self.assertEqual(payload["locale"], "en_US")
+            self.assertEqual(payload["locale"], "UA")
             self.assertEqual(payload["_lang"], "en_US")
-            self.assertEqual(payload["_currency"], "USD")
+            self.assertEqual(payload["_currency"], "UAH")
             self.assertEqual(payload["lang"], "en_US")
-            self.assertEqual(payload["currency"], "USD")
+            self.assertEqual(payload["currency"], "UAH")
             self.assertEqual(payload["taskSceneId"], 149)
             self.assertEqual(payload["sceneId"], 149)
             self.assertTrue(payload["fromNew"])
@@ -3628,10 +3631,12 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
 
     def test_task_delivery_query_includes_ttid_and_platform_in_params_and_data_and_sign(self):
         """
-        Перевіряє, що для interactive task ендпоінтів обов'язкові параметри ttid та platform передаються:
-        1) у URL query params (params["ttid"], params["platform"]),
-        2) всередині JSON-пейлоаду data,
-        3) підпис sign розраховується суворо з точного рядка data.
+        Перевіряє, що для interactive task ендпоінтів:
+        1) у URL query params передаються: appKey (TASK_MTOP_APP_KEY=24815441), isSec=1, security=true,
+           securityParamsPosition=data, H5Request=true, asac, platform (а ttid відсутній у query params),
+        2) всередині JSON-пейлоаду data передаються: ua, umidToken, umidTokenType, ttid, platform, locale, _currency,
+        3) у тілі POST передаються data, bx-umidtoken та bx-sys,
+        4) підпис sign розраховується суворо з точного рядка data та TASK_MTOP_APP_KEY.
         """
         client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
         mgr = CheckinManager(client)
@@ -3639,31 +3644,51 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
         for api in (TASK_DELIVERY_QUERY_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API):
             params = mgr._prepare_mtop_params(api=api, data={"taskId": "test_task_123"})
             self.assertIsNotNone(params)
-            self.assertIn("ttid", params)
-            self.assertEqual(params["ttid"], TASK_TTID)
-            self.assertIn("platform", params)
+            self.assertEqual(params["appKey"], TASK_MTOP_APP_KEY)
+            self.assertEqual(params["isSec"], "1")
+            self.assertEqual(params["security"], "true")
+            self.assertEqual(params["securityParamsPosition"], "data")
+            self.assertEqual(params["H5Request"], "true")
+            self.assertEqual(params["asac"], ASAC_TASK_CAMPAIGN)
             self.assertEqual(params["platform"], TASK_PLATFORM)
+            # ttid не повинен бути у query params
+            self.assertNotIn("ttid", params)
 
             data_obj = json.loads(params["data"])
             self.assertIn("ttid", data_obj)
             self.assertEqual(data_obj["ttid"], TASK_TTID)
-            self.assertIn("platform", data_obj)
+            self.assertEqual(data_obj["locale"], "UA")
+            self.assertEqual(data_obj["_currency"], "UAH")
+            self.assertEqual(data_obj["umidToken"], TASK_UMID_TOKEN)
+            self.assertEqual(data_obj["umidTokenType"], "TOKEN")
+            self.assertTrue(data_obj["ua"].startswith("defaultUA2_load_failed with timeout@@"))
             self.assertEqual(data_obj["platform"], TASK_PLATFORM)
 
             # Перевірка строгої валідності MD5-підпису
             expected_sign = hashlib.md5(f"mytoken123&{params['t']}&{params['appKey']}&{params['data']}".encode("utf-8")).hexdigest()
             self.assertEqual(params["sign"], expected_sign)
 
-        # Перевірка відправки ttid та platform у query_params під час _call_mtop
+        # Перевірка відправки headers, query params та post body під час _call_mtop
         with patch.object(client, "post") as mock_post:
             mock_post.return_value = MagicMock(status_code=200, json=lambda: {"ret": ["SUCCESS::ok"], "data": {}})
             mgr._call_mtop(TASK_DELIVERY_QUERY_API, data={"taskSceneId": 149})
             mock_post.assert_called_once()
             called_query_params = mock_post.call_args[1]["params"]
-            self.assertIn("ttid", called_query_params)
-            self.assertEqual(called_query_params["ttid"], TASK_TTID)
-            self.assertIn("platform", called_query_params)
+            self.assertEqual(called_query_params["appKey"], TASK_MTOP_APP_KEY)
+            self.assertEqual(called_query_params["isSec"], "1")
+            self.assertEqual(called_query_params["security"], "true")
+            self.assertEqual(called_query_params["H5Request"], "true")
             self.assertEqual(called_query_params["platform"], TASK_PLATFORM)
+            self.assertNotIn("ttid", called_query_params)
+
+            called_post_data = mock_post.call_args[1]["data"]
+            self.assertIn("data", called_post_data)
+            self.assertEqual(called_post_data["bx-umidtoken"], TASK_BX_UMIDTOKEN)
+            self.assertEqual(called_post_data["bx-sys"], "ua-l:no__um-l:no__js:https://g.alicdn.com/")
+
+            called_headers = mock_post.call_args[1]["headers"]
+            self.assertEqual(called_headers["asac"], ASAC_TASK_CAMPAIGN)
+            self.assertEqual(called_headers["Referer"], "https://m.aliexpress.com/")
 
     def test_task_delivery_query_error_sets_failed_status_and_skips_catalog_simulation(self):
         """

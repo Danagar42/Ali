@@ -23,7 +23,10 @@ from src.config import (
     TASK_LANG,
     TASK_CURRENCY,
     TASK_TTID,
-    TASK_PLATFORM
+    TASK_PLATFORM,
+    TASK_UMID_TOKEN,
+    TASK_BX_UMIDTOKEN,
+    TASK_MTOP_APP_KEY
 )
 
 logger = logging.getLogger(__name__)
@@ -605,6 +608,9 @@ class CheckinManager:
         else:
             asac_val = ASAC_CAMPAIGN
 
+        if is_task_api and app_key == MTOP_APP_KEY:
+            app_key = TASK_MTOP_APP_KEY
+
         ttid_val = TASK_TTID if is_task_api else None
         platform_val = TASK_PLATFORM if is_task_api else None
         if isinstance(data, dict):
@@ -623,11 +629,16 @@ class CheckinManager:
             except Exception:
                 pass
 
+        ua_task_default = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
+
         if data is None or data == "" or data == {}:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
             elif is_task_api:
                 data_obj = {
+                    "ua": ua_task_default,
+                    "umidToken": TASK_UMID_TOKEN,
+                    "umidTokenType": "TOKEN",
                     "taskSceneId": TASK_SCENE_ID,
                     "taskAppKey": TASK_APP_KEY,
                     "projectAppKey": PROJECT_APP_KEY,
@@ -672,6 +683,9 @@ class CheckinManager:
             data_copy = dict(data)
             if is_task_api:
                 data_copy["asac"] = asac_val
+                data_copy.setdefault("ua", ua_task_default)
+                data_copy.setdefault("umidToken", TASK_UMID_TOKEN)
+                data_copy.setdefault("umidTokenType", "TOKEN")
                 data_copy.setdefault("ttid", ttid_val or TASK_TTID)
                 data_copy.setdefault("platform", platform_val or TASK_PLATFORM)
                 data_copy.setdefault("projectAppKey", PROJECT_APP_KEY)
@@ -697,6 +711,9 @@ class CheckinManager:
                 if isinstance(parsed_data, dict):
                     if is_task_api:
                         parsed_data["asac"] = asac_val
+                        parsed_data.setdefault("ua", ua_task_default)
+                        parsed_data.setdefault("umidToken", TASK_UMID_TOKEN)
+                        parsed_data.setdefault("umidTokenType", "TOKEN")
                         parsed_data.setdefault("ttid", ttid_val or TASK_TTID)
                         parsed_data.setdefault("platform", platform_val or TASK_PLATFORM)
                         parsed_data.setdefault("projectAppKey", PROJECT_APP_KEY)
@@ -746,7 +763,13 @@ class CheckinManager:
             "asac": asac_val,
             "data": data_str
         }
-        if ttid_val:
+        if is_task_api:
+            mtop_params["isSec"] = "1"
+            mtop_params["security"] = "true"
+            mtop_params["securityParamsPosition"] = "data"
+            mtop_params["H5Request"] = "true"
+            mtop_params["asac"] = asac_val
+        elif ttid_val:
             mtop_params["ttid"] = ttid_val
         if platform_val:
             mtop_params["platform"] = platform_val
@@ -775,13 +798,17 @@ class CheckinManager:
             "interactive.sign" in api or
             "growth." in api
         )
-        referer = COIN_MOBILE_REFERER if is_mobile_api else COIN_PC_REFERER
-        origin = MOBILE_ORIGIN if is_mobile_api else ORIGIN
         if is_task_api:
+            referer = "https://m.aliexpress.com/"
+            origin = "https://m.aliexpress.com"
             asac_header = ASAC_TASK_CAMPAIGN
         elif is_mobile_api:
+            referer = COIN_MOBILE_REFERER
+            origin = MOBILE_ORIGIN
             asac_header = ASAC_MOBILE_CAMPAIGN
         else:
+            referer = COIN_PC_REFERER
+            origin = ORIGIN
             asac_header = ASAC_CAMPAIGN
         headers = {
             "Referer": referer,
@@ -811,12 +838,16 @@ class CheckinManager:
 
             data_str = params.get("data", "{}")
             query_params = {k: v for k, v in params.items() if k != "data"}
+            post_body = {"data": data_str}
+            if is_task_api:
+                post_body["bx-umidtoken"] = TASK_BX_UMIDTOKEN
+                post_body["bx-sys"] = "ua-l:no__um-l:no__js:https://g.alicdn.com/"
 
             try:
                 resp = self.client.post(
                     url,
                     params=query_params,
-                    data={"data": data_str},
+                    data=post_body,
                     headers=headers
                 )
                 if resp is not None and is_captcha_required(resp):
