@@ -17,7 +17,8 @@ from src.config import (
     TASK_LANG,
     TASK_CURRENCY,
     TASK_TTID,
-    TASK_PLATFORM
+    TASK_PLATFORM,
+    TASK_PLATFORM_CANDIDATES
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,25 @@ def _is_task_success(data: Any) -> bool:
     return False
 
 
+def _is_no_group_match(res: Any) -> bool:
+    """
+    Визначає, чи повернув MTOP помилку таргетингу 'no group match' (E2-14-3).
+    """
+    if not isinstance(res, dict):
+        return False
+    ret = res.get("ret")
+    ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+    if "E2-14-3" in ret_str or "no group match" in ret_str.lower():
+        return True
+    data_field = res.get("data")
+    if isinstance(data_field, dict):
+        if str(data_field.get("errorCode", "")).strip() == "E2-14-3":
+            return True
+        if "no group match" in str(data_field.get("errorMsg", "")).lower():
+            return True
+    return False
+
+
 class CoinsFarmManager:
     """
     Керує безпечним фармом монет за завдання (Coin Tasks):
@@ -116,6 +136,7 @@ class CoinsFarmManager:
         self.completed_tasks = 0
         self.status = "INIT"
         self.error_message: Optional[str] = None
+        self.working_platform: str = TASK_PLATFORM
 
     @classmethod
     def reset_dead_urls(cls):
@@ -130,52 +151,86 @@ class CoinsFarmManager:
         # 1. Основний шлях: MTOP interactive.task.delivery.query (тільки якщо checkin_mgr доступний)
         if self.checkin_mgr is not None:
             try:
-                mtop_res = self.checkin_mgr._call_mtop(
-                    TASK_DELIVERY_QUERY_API,
-                    data={
-                        "taskSceneId": TASK_SCENE_ID,
-                        "sceneId": TASK_SCENE_ID,
-                        "taskAppKey": TASK_APP_KEY,
-                        "projectAppKey": PROJECT_APP_KEY,
-                        "asac": ASAC_TASK_CAMPAIGN,
-                        "ttid": TASK_TTID,
-                        "platform": TASK_PLATFORM,
-                        "fromNew": True,
-                        "locale": TASK_LOCALE,
-                        "_lang": TASK_LANG,
-                        "_currency": TASK_CURRENCY,
-                        "lang": TASK_LANG,
-                        "currency": TASK_CURRENCY
-                    }
-                )
-                if not mtop_res or not isinstance(mtop_res, dict):
-                    logger.warning(f"[{self.account_name}] ⚠️ MTOP {TASK_DELIVERY_QUERY_API} не повернув відповіді.")
-                    self.status = "FAILED"
-                    self.error_message = "No response from MTOP"
-                    return []
+                candidate_platforms: List[str] = []
+                for p in [TASK_PLATFORM] + TASK_PLATFORM_CANDIDATES:
+                    if p and p not in candidate_platforms:
+                        candidate_platforms.append(p)
 
-                ret = mtop_res.get("ret")
-                ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+                mtop_res: Optional[Dict[str, Any]] = None
+                working_platform: Optional[str] = None
+                all_no_group_match = True
 
-                is_success = False
-                if isinstance(ret, list) and ret:
-                    if "SUCCESS" in ret_str.upper():
+                for platform_candidate in candidate_platforms:
+                    res = self.checkin_mgr._call_mtop(
+                        TASK_DELIVERY_QUERY_API,
+                        data={
+                            "taskSceneId": TASK_SCENE_ID,
+                            "sceneId": TASK_SCENE_ID,
+                            "taskAppKey": TASK_APP_KEY,
+                            "projectAppKey": PROJECT_APP_KEY,
+                            "asac": ASAC_TASK_CAMPAIGN,
+                            "ttid": TASK_TTID,
+                            "platform": platform_candidate,
+                            "fromNew": True,
+                            "locale": TASK_LOCALE,
+                            "_lang": TASK_LANG,
+                            "_currency": TASK_CURRENCY,
+                            "lang": TASK_LANG,
+                            "currency": TASK_CURRENCY
+                        }
+                    )
+                    if not res or not isinstance(res, dict):
+                        all_no_group_match = False
+                        continue
+
+                    if _is_no_group_match(res):
+                        logger.info(
+                            f"[{self.account_name}] ℹ️ Платформа '{platform_candidate}' повернула E2-14-3 (no group match). Пробуємо наступний варіант..."
+                        )
+                        continue
+
+                    # Якщо повернулася відповідь не з помилкою no group match
+                    all_no_group_match = False
+                    ret = res.get("ret")
+                    ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+
+                    is_success = False
+                    if isinstance(ret, list) and ret:
+                        if "SUCCESS" in ret_str.upper():
+                            is_success = True
+                    elif res.get("success") is True or (isinstance(res.get("data"), dict) and res["data"].get("success") is not False):
                         is_success = True
+                    elif "data" in res and ret is None:
+                        is_success = True
+
+                    if is_success:
+                        logger.info(f"[{self.account_name}] ✅ Знайдено робочу платформу для завдань: '{platform_candidate}'")
+                        mtop_res = res
+                        working_platform = platform_candidate
+                        self.working_platform = platform_candidate
+                        break
                     else:
                         logger.error(f"[{self.account_name}] ❌ Помилка запиту завдань ({TASK_DELIVERY_QUERY_API}): {ret_str}")
                         self.status = "FAILED"
                         self.error_message = ret_str
                         return []
-                elif mtop_res.get("success") is True or (isinstance(mtop_res.get("data"), dict) and mtop_res["data"].get("success") is not False):
-                    is_success = True
-                elif "data" in mtop_res and ret is None:
-                    is_success = True
 
-                if not is_success:
-                    logger.error(f"[{self.account_name}] ❌ MTOP task.delivery.query завершився невдало: {ret_str or mtop_res}")
-                    self.status = "FAILED"
-                    self.error_message = ret_str or "Query failed"
-                    return []
+                if working_platform is None:
+                    if all_no_group_match:
+                        logger.warning(
+                            f"[{self.account_name}] ⚠️ Для поточної сцени/регіону немає активної групи завдань "
+                            f"(E2-14-3: no group match). Можливо, потрібні актуальні taskSceneId та projectAppKey з додатку."
+                        )
+                        self.status = "SKIPPED"
+                        self.error_message = "no group match (E2-14-3)"
+                        return []
+                    elif self.status != "FAILED":
+                        logger.warning(f"[{self.account_name}] ⚠️ MTOP {TASK_DELIVERY_QUERY_API} не повернув відповіді.")
+                        self.status = "FAILED"
+                        self.error_message = "No response from MTOP"
+                        return []
+                    else:
+                        return []
 
                 # Виводимо повну структуру отриманого JSON (data) при успішній відповіді
                 data_field = mtop_res.get("data")
@@ -242,7 +297,7 @@ class CoinsFarmManager:
                             "lang": it.get("lang") or it.get("_lang") or TASK_LANG,
                             "currency": it.get("currency") or it.get("_currency") or TASK_CURRENCY,
                             "ttid": it.get("ttid") or TASK_TTID,
-                            "platform": it.get("platform") or TASK_PLATFORM,
+                            "platform": it.get("platform") or working_platform or TASK_PLATFORM,
                             "raw": it
                         })
 
@@ -358,6 +413,9 @@ class CoinsFarmManager:
             if self.status == "FAILED":
                 logger.error(f"[{self.account_name}] ❌ Етап виконання завдань позначено як FAILED через помилку MTOP API.")
                 return 0
+            if self.status in ("SKIPPED", "NO_TASKS"):
+                logger.info(f"[{self.account_name}] ℹ️ Виконання завдань пропущено ({self.status}).")
+                return 0
 
             safe_tasks = [t for t in active_tasks if self.is_safe_task(t)]
 
@@ -457,6 +515,7 @@ class CoinsFarmManager:
         if not task_id:
             return False
 
+        task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
         payload = {
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
@@ -464,7 +523,7 @@ class CoinsFarmManager:
             "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
             "sceneId": task.get("sceneId", TASK_SCENE_ID),
             "ttid": task.get("ttid", TASK_TTID),
-            "platform": task.get("platform", TASK_PLATFORM),
+            "platform": task_platform,
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),
@@ -498,6 +557,7 @@ class CoinsFarmManager:
         un_issue = task.get("unIssueRecord")
         detail_ids_str = json.dumps(un_issue) if isinstance(un_issue, (list, dict)) else str(un_issue or "")
 
+        task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
         payload = {
             "taskInstanceId": task_id,
             "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
@@ -507,7 +567,7 @@ class CoinsFarmManager:
             "detailIds": "",
             "detailIdsString": detail_ids_str,
             "ttid": task.get("ttid", TASK_TTID),
-            "platform": task.get("platform", TASK_PLATFORM),
+            "platform": task_platform,
             "fromNew": True,
             "asac": ASAC_TASK_CAMPAIGN,
             "idemId": str(int(time.time() * 1000)),

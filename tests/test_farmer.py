@@ -3758,6 +3758,102 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(issue_calls[0][1]["data"]["ttid"], TASK_TTID)
             self.assertEqual(issue_calls[0][1]["data"]["platform"], TASK_PLATFORM)
 
+    def test_task_delivery_query_platform_fallback_succeeds_on_second_candidate(self):
+        """
+        Перевіряє, що якщо перший platform (наприклад android) повертає E2-14-3::no group match,
+        скрипт пробує наступні кандидати (wireless) і при SUCCESS використовує його далі для complete та claim.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        tried_platforms = []
+
+        def mtop_side_effect(api, data=None):
+            if api == TASK_DELIVERY_QUERY_API:
+                plat = data.get("platform")
+                tried_platforms.append(plat)
+                if plat == "android":
+                    return {
+                        "api": TASK_DELIVERY_QUERY_API,
+                        "data": {"errorCode": "E2-14-3", "errorMsg": "no group match."},
+                        "ret": ["E2-14-3::no group match."],
+                        "v": "1.0"
+                    }
+                elif plat == "wireless":
+                    return {
+                        "api": TASK_DELIVERY_QUERY_API,
+                        "ret": ["SUCCESS::调用成功"],
+                        "data": {
+                            "result": [
+                                {
+                                    "taskInstanceId": "task_wire_1",
+                                    "taskTitle": "Browse 15s via wireless",
+                                    "materials": [{"newTaskStatus": "todo", "staySeconds": 15, "actionUrl": "https://aliexpress.com/item/1.html"}]
+                                }
+                            ]
+                        }
+                    }
+            elif api == TASK_PROCESS_COMPLETE_API:
+                return {"ret": ["SUCCESS::ok"], "data": {"success": True}}
+            elif api == TASK_PROCESS_ISSUE_API:
+                return {"ret": ["SUCCESS::ok"], "data": {"success": True, "awardCoins": 15}}
+            return None
+
+        with patch.object(mgr, "_call_mtop", side_effect=mtop_side_effect) as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(client, "sleep_random"):
+
+            done = coins.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins.status, "SUCCESS")
+            self.assertEqual(coins.working_platform, "wireless")
+            self.assertIn("android", tried_platforms)
+            self.assertIn("wireless", tried_platforms)
+
+            complete_calls = [c for c in mock_mtop.call_args_list if c[0][0] == TASK_PROCESS_COMPLETE_API]
+            self.assertTrue(len(complete_calls) > 0)
+            self.assertEqual(complete_calls[0][1]["data"]["platform"], "wireless")
+
+            issue_calls = [c for c in mock_mtop.call_args_list if c[0][0] == TASK_PROCESS_ISSUE_API]
+            self.assertTrue(len(issue_calls) > 0)
+            self.assertEqual(issue_calls[0][1]["data"]["platform"], "wireless")
+
+    def test_task_delivery_query_all_candidates_no_group_match_sets_skipped_status(self):
+        """
+        Перевіряє, що якщо всі варіанти platform повертають E2-14-3::no group match,
+        скрипт встановлює статус SKIPPED (а не FAILED), логує попередження і не робить фейковий перегляд каталогу.
+        """
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_1720000000"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        no_group_res = {
+            "api": TASK_DELIVERY_QUERY_API,
+            "data": {"errorCode": "E2-14-3", "errorMsg": "no group match."},
+            "ret": ["E2-14-3::no group match."],
+            "v": "1.0"
+        }
+
+        with patch.object(mgr, "_call_mtop", return_value=no_group_res) as mock_mtop, \
+             patch.object(client, "get") as mock_get:
+
+            done = coins.farm_browse_tasks(count=4)
+            self.assertEqual(done, 0)
+            self.assertEqual(coins.status, "SKIPPED")
+
+            # Переконуємось, що спробували всі кандидати
+            called_platforms = [c[1]["data"]["platform"] for c in mock_mtop.call_args_list if c[0][0] == TASK_DELIVERY_QUERY_API]
+            self.assertTrue(len(called_platforms) >= 3)
+            self.assertIn("android", called_platforms)
+            self.assertIn("wireless", called_platforms)
+            self.assertIn("h5", called_platforms)
+
+            # Жоден каталог не відкривався
+            for call in mock_get.call_args_list:
+                called_url = call[0][0]
+                self.assertNotIn("category", called_url)
+                self.assertNotIn("women-clothing", called_url)
 
 
 if __name__ == "__main__":
