@@ -91,21 +91,31 @@ def main():
             checkin_mgr = CheckinManager(client)
             checkin_ok = checkin_mgr.run_checkin()
 
-            # 3.2 Фарм монет за перегляд
-            coins_mgr = CoinsFarmManager(client)
+            # 3.2 Фарм монет за перегляд безпечних завдань (~15 сек)
+            coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
             coins_done = coins_mgr.farm_browse_tasks(count=4)
 
             # 3.3 Збір купонів
             coupon_mgr = CouponCollector(client)
             coupons_done = coupon_mgr.collect_available_coupons()
 
+            # Облік зароблених монет (чекін + безпечні завдання)
+            task_coins = getattr(coins_mgr, "task_coins_earned", 0)
+            if not isinstance(task_coins, (int, float)):
+                task_coins = 0
+            total_earned_today = (checkin_mgr.coins_earned or 0) + int(task_coins)
+
+            account_total_coins = checkin_mgr.total_coins
+            if account_total_coins is not None and task_coins > 0:
+                account_total_coins += int(task_coins)
+
             # Фіксація звіту по акаунту для сповіщень
             summary = AccountSummary(
                 name=account_name,
                 checkin_status=checkin_mgr.status,
-                coins_earned=checkin_mgr.coins_earned,
+                coins_earned=total_earned_today,
                 streak_days=checkin_mgr.streak_days,
-                total_coins=checkin_mgr.total_coins,
+                total_coins=account_total_coins,
                 tasks_done=coins_done,
                 coupons_claimed=coupons_done,
                 session_valid=checkin_mgr.session_valid

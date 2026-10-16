@@ -11,7 +11,13 @@ from src.config import (
     ASAC_CAMPAIGN,
     ASAC_MOBILE_CAMPAIGN,
     COIN_PC_REFERER,
-    ORIGIN
+    ORIGIN,
+    TASK_SCENE_ID,
+    TASK_APP_KEY,
+    ASAC_TASK_CAMPAIGN,
+    TASK_DELIVERY_QUERY_API,
+    TASK_PROCESS_COMPLETE_API,
+    TASK_PROCESS_ISSUE_API
 )
 
 logger = logging.getLogger(__name__)
@@ -574,18 +580,35 @@ class CheckinManager:
         """
         Формує параметри MTOP з обов'язковим хеш-підписом sign та актуальним timestamp.
         """
+        is_task_api = (
+            api in (TASK_DELIVERY_QUERY_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API)
+            or "interactive.task" in api
+        )
         is_mobile = (
-            api in (MOBILE_SIGN_EXECUTE_API, MOBILE_SIGN_LIST_API, MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API)
+            is_task_api
+            or api in (MOBILE_SIGN_EXECUTE_API, MOBILE_SIGN_LIST_API, MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API)
             or api in MOBILE_CHECKIN_APIS
             or "coin.channel." in api
             or "interactive.sign" in api
             or "growth." in api
         )
-        asac_val = ASAC_MOBILE_CAMPAIGN if is_mobile else ASAC_CAMPAIGN
+        if is_task_api:
+            asac_val = ASAC_TASK_CAMPAIGN
+        elif is_mobile:
+            asac_val = ASAC_MOBILE_CAMPAIGN
+        else:
+            asac_val = ASAC_CAMPAIGN
 
         if data is None:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
+            elif api == TASK_DELIVERY_QUERY_API:
+                data_obj = {
+                    "taskSceneId": TASK_SCENE_ID,
+                    "taskAppKey": TASK_APP_KEY,
+                    "asac": asac_val,
+                    "fromNew": True
+                }
             elif api == MOBILE_SIGN_EXECUTE_API:
                 data_obj = {
                     "playCode": "COIN_CHANNEL_2.0",
@@ -670,7 +693,12 @@ class CheckinManager:
         із підтримкою автоматичного відновлення (Self-Healing) токена.
         """
         url = f"https://acs.aliexpress.com/h5/{api}/1.0/"
+        is_task_api = (
+            api in (TASK_DELIVERY_QUERY_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API)
+            or "interactive.task" in api
+        )
         is_mobile_api = (
+            is_task_api or
             api in MOBILE_CHECKIN_APIS or
             api in (MOBILE_SIGN_LIST_API, MOBILE_SIGN_EXECUTE_API, MOBILE_SIGN_QUERY_LIST_API, MOBILE_RECEIVE_PRIZE_API) or
             "coin.channel." in api or
@@ -679,7 +707,12 @@ class CheckinManager:
         )
         referer = COIN_MOBILE_REFERER if is_mobile_api else COIN_PC_REFERER
         origin = MOBILE_ORIGIN if is_mobile_api else ORIGIN
-        asac_header = ASAC_MOBILE_CAMPAIGN if is_mobile_api else ASAC_CAMPAIGN
+        if is_task_api:
+            asac_header = ASAC_TASK_CAMPAIGN
+        elif is_mobile_api:
+            asac_header = ASAC_MOBILE_CAMPAIGN
+        else:
+            asac_header = ASAC_CAMPAIGN
         headers = {
             "Referer": referer,
             "Origin": origin,

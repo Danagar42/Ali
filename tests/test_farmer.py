@@ -3161,6 +3161,301 @@ class TestMobileCoinChannelCheckin(unittest.TestCase):
             self.assertNotIn(MOBILE_SIGN_QUERY_LIST_API, calls)
 
 
+class TestSafeCoinTasksAutomation(unittest.TestCase):
+    def setUp(self):
+        CoinsFarmManager.reset_dead_urls()
+
+    def tearDown(self):
+        CoinsFarmManager.reset_dead_urls()
+
+    def test_is_safe_task_accepts_browse_and_claim_tasks(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        # 1. Завдання на перегляд сторінки (browse / view / 15s)
+        safe_browse_1 = {
+            "taskId": "1001",
+            "taskTitle": "Browse items for 15s to get coins",
+            "taskType": 0,
+            "status": "todo",
+            "staySeconds": 15
+        }
+        self.assertTrue(mgr.is_safe_task(safe_browse_1))
+
+        # 2. Завдання з безпечним типом "browse"
+        safe_browse_2 = {
+            "taskId": "1002",
+            "taskTitle": "Daily discovery",
+            "taskType": "browse",
+            "status": "todo"
+        }
+        self.assertTrue(mgr.is_safe_task(safe_browse_2))
+
+        # 3. Завдання готове до забирання нагороди (waitForReceive)
+        safe_claim_1 = {
+            "taskId": "1003",
+            "taskTitle": "Order coins reward",  # even if word order is in title, if already done to claim
+            "status": "waitForReceive",
+            "unIssueRecord": ["rec_123"]
+        }
+        # Notice: if it has unsafe words in title, safety filter checks UNSAFE_KEYWORDS first:
+        # Let's verify a standard clean claim task:
+        safe_claim_clean = {
+            "taskId": "1004",
+            "taskTitle": "Browse reward claim",
+            "status": "waitForReceive",
+            "unIssueRecord": ["rec_123"]
+        }
+        self.assertTrue(mgr.is_safe_task(safe_claim_clean))
+
+        # 4. Завдання на пошук (search)
+        safe_search = {
+            "taskId": "1005",
+            "taskTitle": "Search top finds",
+            "actionType": "search",
+            "status": "todo"
+        }
+        self.assertTrue(mgr.is_safe_task(safe_search))
+
+    def test_is_safe_task_strictly_rejects_unsafe_actions(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        # 1. Купівля або замовлення (order, buy, pay, purchase)
+        unsafe_order = {
+            "taskId": "2001",
+            "taskTitle": "Place an order to earn 500 coins",
+            "taskType": "order",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_order))
+
+        unsafe_buy = {
+            "taskId": "2002",
+            "taskTitle": "Buy any item today",
+            "actionUrl": "https://aliexpress.com/buy",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_buy))
+
+        # 2. Додавання в кошик (cart)
+        unsafe_cart = {
+            "taskId": "2003",
+            "taskTitle": "Add 2 items to your cart",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_cart))
+
+        # 3. Підписка на магазин (follow)
+        unsafe_follow = {
+            "taskId": "2004",
+            "taskTitle": "Follow official store",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_follow))
+
+        # 4. Прив'язка або зовнішній шер (share, bind)
+        unsafe_share = {
+            "taskId": "2005",
+            "taskTitle": "Share deal with friends",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_share))
+
+        # 5. Уже виконані завдання не беруться в роботу повторно
+        completed_task = {
+            "taskId": "2006",
+            "taskTitle": "Browse items for 15s",
+            "taskType": 0,
+            "status": "completed"
+        }
+        self.assertFalse(mgr.is_safe_task(completed_task))
+
+        # 6. Некоректні вхідні дані
+        self.assertFalse(mgr.is_safe_task(None))
+        self.assertFalse(mgr.is_safe_task("invalid"))
+
+    def test_fetch_active_tasks_mtop_normalization(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        mock_delivery_response = {
+            "api": "mtop.aliexpress.interactive.task.delivery.query",
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "result": [
+                    {
+                        "taskInstanceId": "inst_999",
+                        "taskAppKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh",
+                        "taskSceneId": 149,
+                        "materials": [
+                            {
+                                "taskTitle": "Browse coins catalog 15s",
+                                "taskType": 0,
+                                "newTaskStatus": "todo",
+                                "staySeconds": 15,
+                                "actionUrl": "https://www.aliexpress.com/p/coin-pc-index/index.html",
+                                "unIssueRecord": None
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        with patch.object(checkin_mgr, "_call_mtop", return_value=mock_delivery_response):
+            tasks = coins_mgr.fetch_active_tasks()
+            self.assertEqual(len(tasks), 1)
+            t = tasks[0]
+            self.assertEqual(t["taskInstanceId"], "inst_999")
+            self.assertEqual(t["taskTitle"], "Browse coins catalog 15s")
+            self.assertEqual(t["staySeconds"], 15)
+            self.assertEqual(t["status"], "todo")
+            self.assertEqual(t["actionUrl"], "https://www.aliexpress.com/p/coin-pc-index/index.html")
+
+    def test_farm_browse_tasks_executes_safe_browse_with_15s_and_claims_coins(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        safe_task = {
+            "taskInstanceId": "inst_123",
+            "taskAppKey": "key_app",
+            "taskSceneId": 149,
+            "taskType": 0,
+            "taskTitle": "Browse items for 15s",
+            "status": "todo",
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/item/123.html",
+            "unIssueRecord": None
+        }
+
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[safe_task]), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)) as mock_get, \
+             patch.object(client, "sleep_random") as mock_sleep, \
+             patch.object(coins_mgr, "_complete_task", return_value=True) as mock_complete, \
+             patch.object(coins_mgr, "_claim_task_reward", return_value=20) as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins_mgr.completed_tasks, 1)
+            self.assertEqual(coins_mgr.task_coins_earned, 20)
+
+            mock_get.assert_called_once_with("https://aliexpress.com/item/123.html")
+            mock_sleep.assert_called_once()
+            # Verify sleep duration was approximately 15 seconds
+            args = mock_sleep.call_args[0]
+            self.assertGreaterEqual(args[0], 15.0)
+
+            mock_complete.assert_called_once_with(safe_task)
+            mock_claim.assert_called_once_with(safe_task)
+
+    def test_farm_browse_tasks_claims_wait_for_receive_directly_without_sleep(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        ready_task = {
+            "taskInstanceId": "inst_ready_777",
+            "taskTitle": "View items done",
+            "status": "waitForReceive",
+            "unIssueRecord": ["rec_777"]
+        }
+
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[ready_task]), \
+             patch.object(client, "get") as mock_get, \
+             patch.object(client, "sleep_random") as mock_sleep, \
+             patch.object(coins_mgr, "_claim_task_reward", return_value=15) as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins_mgr.completed_tasks, 1)
+            self.assertEqual(coins_mgr.task_coins_earned, 15)
+
+            # Direct claim: no unnecessary URL browsing or 15s wait
+            mock_get.assert_not_called()
+            mock_sleep.assert_not_called()
+            mock_claim.assert_called_once_with(ready_task)
+
+    def test_complete_task_payload_and_issue_reward(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        task = {
+            "taskInstanceId": "inst_555",
+            "taskAppKey": "test_app_key",
+            "taskSceneId": 149,
+            "unIssueRecord": ["rec_abc"]
+        }
+
+        complete_response = {
+            "api": "mtop.aliexpress.interactive.task.process.complete",
+            "ret": ["SUCCESS::调用成功"],
+            "data": {"success": True}
+        }
+        issue_response = {
+            "api": "mtop.aliexpress.interactive.task.process.issue",
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "success": True,
+                "awardCoins": 15
+            }
+        }
+
+        with patch.object(checkin_mgr, "_call_mtop", side_effect=[complete_response, issue_response]) as mock_call:
+            ok = coins_mgr._complete_task(task)
+            self.assertTrue(ok)
+            coins = coins_mgr._claim_task_reward(task)
+            self.assertEqual(coins, 15)
+
+            self.assertEqual(mock_call.call_count, 2)
+            call1_args = mock_call.call_args_list[0]
+            self.assertEqual(call1_args[0][0], "mtop.aliexpress.interactive.task.process.complete")
+            self.assertEqual(call1_args[1]["data"]["taskInstanceId"], "inst_555")
+
+            call2_args = mock_call.call_args_list[1]
+            self.assertEqual(call2_args[0][0], "mtop.aliexpress.interactive.task.process.issue")
+            self.assertEqual(call2_args[1]["data"]["taskInstanceId"], "inst_555")
+            self.assertIn("rec_abc", call2_args[1]["data"]["detailIdsString"])
+
+    def test_main_accumulates_task_coins_into_summary(self):
+        with patch("src.main.initial_random_jitter"), \
+             patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True), \
+             patch("src.main.AliClient") as mock_client_cls, \
+             patch("src.main.CheckinManager") as mock_checkin_cls, \
+             patch("src.main.CoinsFarmManager") as mock_coins_cls, \
+             patch("src.main.CouponCollector") as mock_coupon_cls, \
+             patch("src.main.NotificationDispatcher") as mock_disp_cls:
+
+            mock_checkin = mock_checkin_cls.return_value
+            mock_checkin.run_checkin.return_value = True
+            mock_checkin.session_valid = True
+            mock_checkin.status = "SUCCESS"
+            mock_checkin.coins_earned = 25
+            mock_checkin.streak_days = 4
+            mock_checkin.total_coins = 400
+
+            mock_coins = mock_coins_cls.return_value
+            mock_coins.farm_browse_tasks.return_value = 2
+            mock_coins.task_coins_earned = 30
+
+            mock_coupon = mock_coupon_cls.return_value
+            mock_coupon.collect_available_coupons.return_value = 1
+
+            disp = MagicMock()
+            mock_disp_cls.return_value = disp
+
+            main_module.main()
+
+            disp.add_summary.assert_called_once()
+            summary = disp.add_summary.call_args[0][0]
+            self.assertEqual(summary.coins_earned, 55)  # 25 (checkin) + 30 (tasks)
+            self.assertEqual(summary.total_coins, 430)  # 400 (checkin balance) + 30 (task coins)
+            self.assertEqual(summary.tasks_done, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

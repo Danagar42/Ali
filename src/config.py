@@ -126,3 +126,11 @@ MTOP_APP_KEY = "12574478"
 MTOP_JSV = "2.7.5"
 ASAC_CAMPAIGN = "2E227052O27XFLCLMIUIOA"
 ASAC_MOBILE_CAMPAIGN = "2E2280406IM61M8MG1F2FB"
+
+# Інтерактивна платформа завдань AliExpress (Coin Tasks)
+TASK_SCENE_ID = 149
+TASK_APP_KEY = "llcvfnh8tuknrw80cgstljy4h2y7i1rh"
+ASAC_TASK_CAMPAIGN = "2E247188QJLF705B9VMWWJ"
+TASK_DELIVERY_QUERY_API = "mtop.aliexpress.interactive.task.delivery.query"
+TASK_PROCESS_COMPLETE_API = "mtop.aliexpress.interactive.task.process.complete"
+TASK_PROCESS_ISSUE_API = "mtop.aliexpress.interactive.task.process.issue"
