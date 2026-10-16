@@ -3,7 +3,7 @@ import time
 import json
 import hashlib
 import logging
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, Tuple, List
 from src.client import AliClient
 from src.config import (
     MTOP_APP_KEY,
@@ -14,6 +14,17 @@ from src.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Мобільний канал чекіну монет AliExpress (H5/Mobile App MTOP growth ендпоінти)
+COIN_MOBILE_REFERER = "https://m.aliexpress.com/p/coin-index/index.html"
+MOBILE_ORIGIN = "https://m.aliexpress.com"
+
+MOBILE_CHECKIN_APIS = [
+    "mtop.aliexpress.growth.bonus.daily.signin",
+    "mtop.aliexpress.growth.coin.sign.in",
+    "mtop.aliexpress.growth.coin.signin",
+    "mtop.aliexpress.coin.signIn"
+]
 
 
 def generate_mtop_sign(token: str, t: str, app_key: str, data: str) -> str:
@@ -119,9 +130,27 @@ def is_captcha_required(res_data: Any) -> bool:
     return False
 
 
+def _collect_nested_dicts(obj: Any, depth: int = 0, max_depth: int = 6) -> List[Dict[str, Any]]:
+    """Рекурсивно збирає всі словники з вкладених структур JSON (включаючи списки та дочірні блоки)."""
+    if depth > max_depth or obj is None:
+        return []
+    blocks: List[Dict[str, Any]] = []
+    if isinstance(obj, dict):
+        blocks.append(obj)
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                blocks.extend(_collect_nested_dicts(v, depth + 1, max_depth))
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                blocks.extend(_collect_nested_dicts(item, depth + 1, max_depth))
+    return blocks
+
+
 def is_already_checked_in(res_data: Any) -> bool:
     """
-    Визначає, чи було чекін уже зараховано раніше сьогодні.
+    Визначає, чи є відповідь свідченням того, що чекін на сьогодні вже був зарахований раніше.
+    Враховує мобільні прапорці hasSignIn, isSignInToday, signToday та ret-коди.
     """
     if res_data is None:
         return False
@@ -129,31 +158,48 @@ def is_already_checked_in(res_data: Any) -> bool:
         return False
 
     text, json_data = _normalize_res(res_data)
-    if not text and not json_data:
+    if not text:
         return False
 
-    if json_data:
-        data_block = json_data.get("data")
-        if isinstance(data_block, dict):
-            inner = data_block.get("data")
-            if isinstance(inner, dict):
-                if inner.get("signToday") is False:
-                    return False
-                if inner.get("signToday") is True:
-                    return True
-            if data_block.get("signToday") is False:
-                return False
-            if data_block.get("signToday") is True:
-                return True
+    if isinstance(json_data, dict):
+        blocks_to_check = _collect_nested_dicts(json_data)
 
+        # 1. Якщо є явний прапорець, що користувач сьогодні ще НЕ зачекінився
+        for b in blocks_to_check:
+            if any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
+                return False
+
+        # 2. Перевірка ret кодів на повторний чекін (SUCCESS_REPEAT_CHECKIN тощо)
         ret = json_data.get("ret")
         if isinstance(ret, list):
             for r in ret:
                 r_lower = str(r).lower()
                 if any(ind in r_lower for ind in [
                     "success_repeat_checkin", "repeat_checkin", "already_checked",
-                    "already_signed", "has_checked", "has_signed", "haschecked", "ischecked"
+                    "already_signed", "has_checked", "has_signed", "haschecked", "ischecked",
+                    "already_signin", "repeat_signin", "has_signin", "signed_today", "already_claimed"
                 ]):
+                    return True
+
+        # 3. Якщо у відповіді є щойно нараховані монети (awardCoins/rewardCoins/bonusAmount > 0)
+        # і ret не вказує на повтор, це свіжий успішний чекін, а не "already done"!
+        has_fresh_award = False
+        for b in blocks_to_check:
+            for k in ("awardCoins", "rewardCoins", "bonusAmount"):
+                v = b.get(k)
+                if v is not None:
+                    try:
+                        if int(float(str(v).replace(",", "").strip())) > 0:
+                            has_fresh_award = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
+            if has_fresh_award:
+                break
+
+        if not has_fresh_award:
+            for b in blocks_to_check:
+                if any(b.get(k) is True for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
                     return True
 
     text_lower = text.lower()
@@ -163,12 +209,15 @@ def is_already_checked_in(res_data: Any) -> bool:
     if "repeat later" in text_lower or "flow_limit" in text_lower or "rate limit" in text_lower:
         return False
 
+    if any(neg in text_lower for neg in ('"signtoday":false', '"signtoday": false', '"hassignin":false', '"hassignin": false', '"issignintoday":false', '"issignintoday": false')):
+        return False
+
     indicators = [
         "has checked in", "have checked in", "already checked in", "already signed in",
         "already_checked", "success_repeat_checkin", "repeat_checkin",
         "haschecked", "ischecked", "checked_in_today", "already_signed",
-        "has signed today", "already checked",
-        'signtoday": true', 'signtoday":true'
+        "has signed today", "already checked", "already sign in", "repeat sign in",
+        "already claimed"
     ]
     return any(ind in text_lower for ind in indicators)
 
@@ -231,41 +280,25 @@ def is_checkin_success(res_data: Any) -> bool:
 
     res_data = json_data
 
-    # Перевірка на явний прапорець невдачі
+    # Перевірка на явний прапорець невдачі на верхньому рівні
     if res_data.get("success") is False:
         return False
 
-    data_block = res_data.get("data")
-    inner_block = None
-    if isinstance(data_block, dict):
-        if data_block.get("success") is False:
-            return False
-        if data_block.get("errorCode") or data_block.get("errorMsg") or data_block.get("errorMessage"):
-            return False
-        inner = data_block.get("data")
-        if isinstance(inner, dict):
-            inner_block = inner
-            if inner_block.get("success") is False:
-                return False
-            if inner_block.get("errorCode") or inner_block.get("errorMsg"):
-                return False
+    # Збираємо всі словники на всіх рівнях вкладеності (data, result, signInResult, module, тощо)
+    all_blocks = _collect_nested_dicts(res_data)
 
-    result_block = res_data.get("result")
-    if isinstance(result_block, dict):
-        if result_block.get("success") is False:
+    for b in all_blocks:
+        if b.get("success") is False:
             return False
-        if result_block.get("errorCode") or result_block.get("errorMsg") or result_block.get("errorMessage"):
+        if b.get("errorCode") or b.get("errorMsg") or b.get("errorMessage"):
+            return False
+        if any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed")):
             return False
 
-    # Явний прапорець успіху на рівні відповіді або блоків data/result
-    if res_data.get("success") is True:
-        return True
-    if isinstance(data_block, dict) and data_block.get("success") is True:
-        return True
-    if isinstance(inner_block, dict) and inner_block.get("success") is True:
-        return True
-    if isinstance(result_block, dict) and result_block.get("success") is True:
-        return True
+    # Явний прапорець успіху на рівні відповіді або будь-якого вкладеного блоку
+    for b in all_blocks:
+        if b.get("success") is True:
+            return True
 
     # Перевірка статусу шлюзу MTOP при відсутності помилок
     ret = res_data.get("ret")
@@ -275,30 +308,41 @@ def is_checkin_success(res_data: Any) -> bool:
     elif isinstance(ret, str) and (ret.startswith("SUCCESS::") or ret == "SUCCESS"):
         return True
 
-    if isinstance(data_block, dict) and (data_block.get("coinCount") or data_block.get("awardCoins") or data_block.get("coins")):
-        return True
+    for b in all_blocks:
+        if (
+            b.get("coinCount") or b.get("awardCoins") or
+            b.get("coins") or b.get("amount") or b.get("rewardCoins")
+        ):
+            return True
 
     return False
 
 
 class CheckinManager:
     """
-    Керує щоденним чекіном монет AliExpress за актуальним протоколом PC Index:
-    - mtop.aliexpress.coin.pc.sign.list (перевірка статусу та стріку)
-    - mtop.aliexpress.coin.pc.sign (виконання щоденного чекіну)
-    - mtop.aliexpress.coin.execute (отримання точного балансу монет)
-    - MTOP-підпис з автоматичним оновленням (Self-Healing токена)
-    - Регіональна сумісність (KR region)
+    Керує щоденним чекіном монет AliExpress за двоканальним протоколом:
+    1) PC Desktop Channel:
+       - mtop.aliexpress.coin.pc.sign.list (перевірка статусу та стріку)
+       - mtop.aliexpress.coin.pc.sign (виконання щоденного чекіну)
+    2) Mobile App Channel:
+       - mtop.aliexpress.growth.bonus.daily.signin / coin.sign.in (growth endpoints)
+    3) Баланс та сервісні запити:
+       - mtop.aliexpress.coin.execute (отримання точного балансу монет)
+       - MTOP-підпис з автоматичним оновленням (Self-Healing токена _m_h5_tk)
     """
+
+    MOBILE_APIS = MOBILE_CHECKIN_APIS
 
     def __init__(self, client: AliClient):
         self.client = client
         self.account_name = client.account_name
-        self.status = "FAILED"  # SUCCESS, ALREADY_DONE, SESSION_EXPIRED, FAILED
+        self.status = "FAILED"  # SUCCESS, ALREADY_DONE, SESSION_EXPIRED, FAILED, CAPTCHA_REQUIRED
         self.streak_days = 0
         self.coins_earned = 0
         self.total_coins: Optional[int] = None
         self.session_valid = True
+        self.pc_status = "FAILED"
+        self.mobile_status = "FAILED"
 
     def _prepare_mtop_params(
         self,
@@ -312,6 +356,8 @@ class CheckinManager:
         if data is None:
             if api == "mtop.aliexpress.coin.execute":
                 data_obj = {"scene": "UserCoinNum"}
+            elif api in MOBILE_CHECKIN_APIS:
+                data_obj = {"channel": "COIN", "asac": ASAC_CAMPAIGN}
             else:
                 data_obj = {"asac": ASAC_CAMPAIGN, "_lang": "en_KR", "_currency": "USD"}
             data_str = json.dumps(data_obj, separators=(",", ":"))
@@ -355,9 +401,11 @@ class CheckinManager:
         із підтримкою автоматичного відновлення (Self-Healing) токена.
         """
         url = f"https://acs.aliexpress.com/h5/{api}/1.0/"
+        referer = COIN_MOBILE_REFERER if api in MOBILE_CHECKIN_APIS else COIN_PC_REFERER
+        origin = MOBILE_ORIGIN if api in MOBILE_CHECKIN_APIS else ORIGIN
         headers = {
-            "Referer": COIN_PC_REFERER,
-            "Origin": ORIGIN,
+            "Referer": referer,
+            "Origin": origin,
             "Content-Type": "application/x-www-form-urlencoded",
             "asac": ASAC_CAMPAIGN,
         }
@@ -563,7 +611,10 @@ class CheckinManager:
 
         for d in (inner_dict, target_dict, res_data):
             if isinstance(d, dict):
-                for key in ["continuousCheckinDays", "continuousDays", "signDays", "streak", "dayNum"]:
+                for key in [
+                    "continuousCheckinDays", "continuousDays", "signDays", "streak",
+                    "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay"
+                ]:
                     val = d.get(key)
                     if val is not None and isinstance(val, (int, str, float)):
                         try:
@@ -587,7 +638,10 @@ class CheckinManager:
         # Дні стріку
         extracted_days = None
         for d in (inner_dict, target_dict, res_data):
-            for key in ["continuousCheckinDays", "continuousDays", "signDays", "streak", "dayNum"]:
+            for key in [
+                "continuousCheckinDays", "continuousDays", "signDays", "streak",
+                "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay"
+            ]:
                 val = d.get(key)
                 if val is not None and isinstance(val, (int, str, float)):
                     try:
@@ -611,7 +665,10 @@ class CheckinManager:
         # Зароблені монети (екстрагуються лише за підтвердженого успіху чекіну або signToday == True)
         if extract_coins:
             for d in (inner_dict, target_dict, res_data):
-                for key in ["awardCoins", "coinCount", "points", "awardPoints", "coin", "coins"]:
+                for key in [
+                    "awardCoins", "coinCount", "points", "awardPoints",
+                    "coin", "coins", "amount", "rewardCoins", "bonusAmount"
+                ]:
                     val = d.get(key)
                     if val is not None and isinstance(val, (int, str, float)):
                         try:
@@ -635,30 +692,121 @@ class CheckinManager:
                     except (ValueError, TypeError):
                         pass
 
-    def run_checkin(self) -> bool:
+    def _extract_mobile_data(self, res_data: Any) -> Tuple[int, int]:
         """
-        Виконує щоденний чекін за діючим протоколом AliExpress PC Index:
-        1) Отримання статусу через mtop.aliexpress.coin.pc.sign.list. Якщо signToday == true -> ALREADY_DONE, стрік signDays.
-        2) Якщо signToday == false -> виклик mtop.aliexpress.coin.pc.sign.
-        3) Отримання точного балансу монет через mtop.aliexpress.coin.execute (scene: "UserCoinNum").
+        Витягує зароблені монети та дні стріку з відповіді мобільного ендпоінту чекіну.
+        Повертає кортеж (coins, streak).
         """
-        logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну...")
+        if res_data is None:
+            return 0, 0
+        if not isinstance(res_data, dict):
+            _, res_data = _normalize_res(res_data)
+            if not isinstance(res_data, dict):
+                return 0, 0
 
-        # 1. Початковий візит до сторінки PC Index для ініціалізації сесії
+        blocks = []
+
+        def _collect(obj, depth=0):
+            if depth > 4:
+                return
+            if isinstance(obj, dict):
+                blocks.append(obj)
+                for k in ("data", "result", "bonus", "reward", "signInInfo", "signInResult", "module", "signInDTO", "signResult"):
+                    v = obj.get(k)
+                    if v is not None:
+                        _collect(v, depth + 1)
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, (dict, list)):
+                        _collect(item, depth + 1)
+
+        _collect(res_data)
+
+        streak_keys = [
+            "continuousCheckinDays", "continuousDays", "signDays", "streak",
+            "dayNum", "day", "days", "consecutiveDays", "signStreak", "currentDay"
+        ]
+        # Специфічні ключі нагороди мають пріоритет над загальними лічильниками балансу
+        primary_coin_keys = ["awardCoins", "rewardCoins", "bonusAmount", "amount"]
+        secondary_coin_keys = ["coins", "coin", "points", "awardPoints", "coinCount"]
+
+        streak = 0
+        coins = 0
+
+        # Перевірка чи є явний негативний прапорець (тоді монети в об'єкті — старі/попередні)
+        has_negative_signin = any(
+            isinstance(b, dict) and any(b.get(k) is False for k in ("signToday", "hasSignIn", "isSignInToday", "hasSigned", "alreadySign", "hasCheckIn", "signed"))
+            for b in blocks
+        )
+
+        for b in blocks:
+            for sk in streak_keys:
+                val = b.get(sk)
+                if val is not None and isinstance(val, (int, str, float)):
+                    try:
+                        s_val = int(float(str(val).replace(",", "").strip()))
+                        if s_val > 0:
+                            streak = max(streak, s_val)
+                    except (ValueError, TypeError):
+                        pass
+
+        if not has_negative_signin:
+            # 1. Шукаємо серед специфічних ключів винагороди
+            for b in blocks:
+                for ck in primary_coin_keys:
+                    val = b.get(ck)
+                    if val is not None and isinstance(val, (int, str, float)):
+                        try:
+                            c_val = int(float(str(val).replace(",", "").strip()))
+                            if c_val > 0:
+                                coins = max(coins, c_val)
+                        except (ValueError, TypeError):
+                            pass
+
+            # 2. Якщо специфічних ключів не знайдено, перевіряємо вторинні ключі
+            if coins == 0:
+                for b in blocks:
+                    for ck in secondary_coin_keys:
+                        val = b.get(ck)
+                        if val is not None and isinstance(val, (int, str, float)):
+                            try:
+                                c_val = int(float(str(val).replace(",", "").strip()))
+                                if c_val > 0:
+                                    coins = max(coins, c_val)
+                            except (ValueError, TypeError):
+                                pass
+
+        return coins, streak
+
+    def _run_pc_checkin(self) -> Dict[str, Any]:
+        """
+        Виконує чекін каналу PC Desktop (PC Index):
+        1) Warmup GET до COIN_PC_REFERER.
+        2) Отримання статусу через mtop.aliexpress.coin.pc.sign.list.
+        3) Якщо не зараховано -> виконання через mtop.aliexpress.coin.pc.sign.
+        Повертає словник: {"status": ..., "coins": ..., "streak": ...}
+        """
+        logger.info(f"[{self.account_name}] 🖥️ [Канал PC] Перевірка та чекін PC Desktop...")
+        pc_result = {"status": "FAILED", "coins": 0, "streak": 0}
+
+        # 1. Warmup до сторінки PC Index
         try:
             home_resp = self.client.get(COIN_PC_REFERER)
             if home_resp and is_captcha_required(home_resp):
                 self.status = "CAPTCHA_REQUIRED"
                 logger.warning(f"[{self.account_name}] 🧩 Сторінка PC Index вимагає капчі WAF!")
-                return False
+                pc_result["status"] = "CAPTCHA_REQUIRED"
+                return pc_result
             if home_resp and home_resp.status_code == 200:
                 if self._parse_coin_page_html(home_resp.text):
-                    self.status = "ALREADY_DONE"
-                    streak_info = f", Стрік: {self.streak_days} дн." if self.streak_days > 0 else ""
-                    balance_info = f", Баланс: {self.total_coins} 🪙" if self.total_coins is not None else ""
-                    logger.info(f"[{self.account_name}] ℹ️ З монетного центру виявлено: чекін на сьогодні вже зараховано!{streak_info}{balance_info}")
-                    self._fetch_coin_balance()
-                    return True
+                    pc_result["status"] = "ALREADY_DONE"
+                    pc_result["streak"] = self.streak_days
+                    status_res = self._call_mtop("mtop.aliexpress.coin.pc.sign.list", data={"asac": ASAC_CAMPAIGN, "_lang": "en_KR", "_currency": "USD"})
+                    if status_res:
+                        self._extract_coins_from_sign_list(status_res)
+                    pc_result["coins"] = self.coins_earned
+                    logger.info(f"[{self.account_name}] ℹ️ [Канал PC] З монетного центру виявлено: чекін на сьогодні вже зараховано!")
+                    return pc_result
         except Exception as e:
             logger.debug(f"[{self.account_name}] Warmup запит до {COIN_PC_REFERER}: {e}")
 
@@ -667,20 +815,26 @@ class CheckinManager:
         status_res = self._call_mtop("mtop.aliexpress.coin.pc.sign.list", data=sign_payload)
 
         if self.status == "CAPTCHA_REQUIRED":
-            return False
+            pc_result["status"] = "CAPTCHA_REQUIRED"
+            return pc_result
 
         sign_today = None
+        pc_streak = 0
+        pc_coins = 0
+
         if status_res:
             if is_captcha_required(status_res):
                 self.status = "CAPTCHA_REQUIRED"
-                logger.warning(f"[{self.account_name}] 🧩 Статус чекіну повернув вимогу капчі (WAF)!")
-                return False
+                logger.warning(f"[{self.account_name}] 🧩 Статус чекіну PC повернув вимогу капчі (WAF)!")
+                pc_result["status"] = "CAPTCHA_REQUIRED"
+                return pc_result
 
             if is_session_expired(status_res):
                 self.session_valid = False
                 self.status = "SESSION_EXPIRED"
                 logger.error(f"[{self.account_name}] ❌ Сесія AliExpress недійсна або прострочена!")
-                return False
+                pc_result["status"] = "SESSION_EXPIRED"
+                return pc_result
 
             data_block = status_res.get("data", {})
             inner_data = data_block.get("data", {}) if isinstance(data_block, dict) and isinstance(data_block.get("data"), dict) else (data_block if isinstance(data_block, dict) else {})
@@ -701,61 +855,225 @@ class CheckinManager:
             is_already_done = sign_today is True or is_already_checked_in(status_res)
             self._extract_telemetry(status_res, extract_coins=is_already_done)
 
-        # 3. Якщо вже зараховано сьогодні
+        # 3. Якщо вже зараховано сьогодні на PC
         if sign_today is True or (status_res and is_already_checked_in(status_res)):
-            self.status = "ALREADY_DONE"
+            pc_result["status"] = "ALREADY_DONE"
             if self.coins_earned == 0 and status_res:
                 self._extract_telemetry(status_res, extract_coins=True)
-            logger.info(f"[{self.account_name}] ℹ️ Чекін на сьогодні вже зараховано (стрік: {self.streak_days} дн.)")
-        else:
-            # 4. Виконання чекіну через mtop.aliexpress.coin.pc.sign
-            sign_res = self._call_mtop("mtop.aliexpress.coin.pc.sign", data=sign_payload)
-            if self.status == "CAPTCHA_REQUIRED":
-                logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну повернуло вимогу капчі (WAF)!")
-                return False
+            pc_result["coins"] = self.coins_earned
+            pc_result["streak"] = self.streak_days
+            logger.info(f"[{self.account_name}] ℹ️ [Канал PC] Чекін на сьогодні вже зараховано (стрік: {pc_result['streak']} дн.)")
+            return pc_result
 
-            if sign_res:
-                if is_captcha_required(sign_res):
-                    self.status = "CAPTCHA_REQUIRED"
-                    logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну повернуло вимогу капчі (WAF)!")
-                    return False
-                elif is_session_expired(sign_res):
-                    self.session_valid = False
-                    self.status = "SESSION_EXPIRED"
-                    logger.error(f"[{self.account_name}] ❌ Сесія AliExpress недійсна або прострочена!")
-                    return False
-                elif is_already_checked_in(sign_res):
-                    self.status = "ALREADY_DONE"
-                    self._extract_telemetry(sign_res, extract_coins=True)
-                    if self.coins_earned == 0 and status_res:
-                        self._extract_coins_from_sign_list(status_res)
-                    logger.info(f"[{self.account_name}] ℹ️ Чекін на сьогодні вже був виконаний раніше.")
-                elif is_checkin_success(sign_res):
-                    self.status = "SUCCESS"
-                    has_explicit_days = self._has_explicit_streak_days(sign_res)
-                    if not has_explicit_days:
-                        self.streak_days = (self.streak_days + 1) if self.streak_days > 0 else 1
-                    self._extract_telemetry(sign_res, extract_coins=True)
-                    if self.streak_days == 0:
-                        self.streak_days = 1
-                    if self.coins_earned == 0 and status_res:
-                        self._extract_coins_from_sign_list(status_res)
-                    logger.info(f"[{self.account_name}] ✅ Чекін успішно виконано! (Стрік: {self.streak_days} дн.)")
-                else:
-                    self.status = "FAILED"
-                    logger.warning(f"[{self.account_name}] ⚠️ Чекін не підтверджено автоматично (можливо, вже зараховано або потрібне оновлення cookies).")
+        # 4. Виконання чекіну через mtop.aliexpress.coin.pc.sign
+        sign_res = self._call_mtop("mtop.aliexpress.coin.pc.sign", data=sign_payload)
+        if self.status == "CAPTCHA_REQUIRED":
+            logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну PC повернуло вимогу капчі (WAF)!")
+            pc_result["status"] = "CAPTCHA_REQUIRED"
+            return pc_result
+
+        if sign_res:
+            if is_captcha_required(sign_res):
+                self.status = "CAPTCHA_REQUIRED"
+                logger.warning(f"[{self.account_name}] 🧩 Виконання чекіну PC повернуло вимогу капчі (WAF)!")
+                pc_result["status"] = "CAPTCHA_REQUIRED"
+                return pc_result
+            elif is_session_expired(sign_res):
+                self.session_valid = False
+                self.status = "SESSION_EXPIRED"
+                logger.error(f"[{self.account_name}] ❌ Сесія AliExpress недійсна або прострочена!")
+                pc_result["status"] = "SESSION_EXPIRED"
+                return pc_result
+            elif is_already_checked_in(sign_res):
+                pc_result["status"] = "ALREADY_DONE"
+                self._extract_telemetry(sign_res, extract_coins=True)
+                if self.coins_earned == 0 and status_res:
+                    self._extract_coins_from_sign_list(status_res)
+                pc_result["coins"] = self.coins_earned
+                pc_result["streak"] = self.streak_days
+                logger.info(f"[{self.account_name}] ℹ️ [Канал PC] Чекін на сьогодні вже був виконаний раніше.")
+                return pc_result
+            elif is_checkin_success(sign_res):
+                pc_result["status"] = "SUCCESS"
+                has_explicit_days = self._has_explicit_streak_days(sign_res)
+                if not has_explicit_days:
+                    self.streak_days = (self.streak_days + 1) if self.streak_days > 0 else 1
+                self._extract_telemetry(sign_res, extract_coins=True)
+                if self.streak_days == 0:
+                    self.streak_days = 1
+                if self.coins_earned == 0 and status_res:
+                    self._extract_coins_from_sign_list(status_res)
+                pc_result["coins"] = self.coins_earned
+                pc_result["streak"] = self.streak_days
+                logger.info(f"[{self.account_name}] ✅ [Канал PC] Чекін успішно виконано! (Стрік: {pc_result['streak']} дн., Монет: +{pc_result['coins']})")
+                return pc_result
             else:
-                if self.status != "CAPTCHA_REQUIRED":
-                    self.status = "FAILED"
-                logger.warning(f"[{self.account_name}] ⚠️ Не отримано відповіді від ендпоінту чекіну.")
+                pc_result["status"] = "FAILED"
+                pc_result["streak"] = self.streak_days
+                logger.warning(f"[{self.account_name}] ⚠️ [Канал PC] Чекін не підтверджено.")
+                return pc_result
+        else:
+            if self.status != "CAPTCHA_REQUIRED":
+                pc_result["status"] = "FAILED"
+            pc_result["streak"] = self.streak_days
+            logger.warning(f"[{self.account_name}] ⚠️ [Канал PC] Не отримано відповіді від ендпоінту чекіну.")
+            return pc_result
+
+    def _run_mobile_checkin(self) -> Dict[str, Any]:
+        """
+        Виконує чекін каналу Mobile App через growth ендпоінти із підтримкою fallback:
+        - mtop.aliexpress.growth.bonus.daily.signin
+        - mtop.aliexpress.growth.coin.sign.in
+        - mtop.aliexpress.growth.coin.signin
+        - mtop.aliexpress.coin.signIn
+        Повертає словник: {"status": ..., "coins": ..., "streak": ...}
+        """
+        logger.info(f"[{self.account_name}] 📱 [Канал Mobile] Початок перевірки та чекіну мобільного додатку...")
+        mobile_result = {"status": "FAILED", "coins": 0, "streak": 0}
+        mobile_payload = {"channel": "COIN", "asac": ASAC_CAMPAIGN}
+
+        for api in MOBILE_CHECKIN_APIS:
+            logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Запит до {api}...")
+            res = self._call_mtop(api, data=mobile_payload)
 
             if self.status == "CAPTCHA_REQUIRED":
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+
+            if not res:
+                logger.debug(f"[{self.account_name}] ⚠️ [Канал Mobile] Немає відповіді від {api}, спроба наступного ендпоінту...")
+                continue
+
+            if is_captcha_required(res):
+                self.status = "CAPTCHA_REQUIRED"
+                logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {api} повернув вимогу капчі (WAF)!")
+                mobile_result["status"] = "CAPTCHA_REQUIRED"
+                return mobile_result
+
+            if is_session_expired(res):
+                self.session_valid = False
+                self.status = "SESSION_EXPIRED"
+                logger.error(f"[{self.account_name}] ❌ [Канал Mobile] Сесія недійсна або прострочена!")
+                mobile_result["status"] = "SESSION_EXPIRED"
+                return mobile_result
+
+            coins, streak = self._extract_mobile_data(res)
+
+            if is_already_checked_in(res):
+                mobile_result["status"] = "ALREADY_DONE"
+                mobile_result["coins"] = coins
+                mobile_result["streak"] = streak
+                logger.info(f"[{self.account_name}] ℹ️ [Канал Mobile] Чекін уже зараховано сьогодні ({api}, стрік: {streak} дн.)")
+                return mobile_result
+
+            if is_checkin_success(res):
+                mobile_result["status"] = "SUCCESS"
+                mobile_result["coins"] = coins
+                mobile_result["streak"] = streak if streak > 0 else 1
+                logger.info(f"[{self.account_name}] ✅ [Канал Mobile] Чекін успішно виконано через {api}! (Стрік: {mobile_result['streak']} дн., Монет: +{mobile_result['coins']})")
+                return mobile_result
+
+            logger.debug(f"[{self.account_name}] ⚠️ [Канал Mobile] Відповідь від {api} не є успіхом чекіну, переходимо до fallback...")
+
+        logger.info(f"[{self.account_name}] ⚠️ [Канал Mobile] Усі мобільні growth-ендпоінти вичерпано без підтвердження.")
+        return mobile_result
+
+    def run_checkin(self) -> bool:
+        """
+        Виконує Dual-Channel щоденний чекін:
+        1) PC Desktop Channel (coin-pc-index / mtop.aliexpress.coin.pc.sign)
+        2) Mobile App Channel (growth endpoints: bonus.daily.signin / coin.sign.in)
+        3) Graceful orchestration & об'єднання результатів:
+           - Якщо хоча б один канал SUCCESS -> загальний статус SUCCESS
+           - Якщо обидва ALREADY_DONE -> ALREADY_DONE
+           - Якщо один ALREADY_DONE, а інший FAILED -> ALREADY_DONE
+           - Якщо обидва FAILED -> FAILED
+           - Якщо капча -> CAPTCHA_REQUIRED
+           - Сумування монет з обох каналів
+           - Встановлення найвищого стріку (пріоритет мобільного, якщо вищий)
+        4) Отримання актуального балансу через mtop.aliexpress.coin.execute
+        """
+        logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну (Dual-Channel: PC + Mobile)...")
+
+        # 1. Запуск PC Desktop чекіну
+        pc_res = self._run_pc_checkin()
+
+        # Якщо на PC спрацювала капча або сесія прострочена — перериваємо негайно
+        if pc_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
+            self.status = "CAPTCHA_REQUIRED"
+            return False
+        if pc_res.get("status") == "SESSION_EXPIRED" or not self.session_valid:
+            self.status = "SESSION_EXPIRED"
+            return False
+
+        # 2. Запуск Mobile App чекіну
+        mobile_res = self._run_mobile_checkin()
+
+        pc_status = pc_res.get("status", "FAILED")
+        mobile_status = mobile_res.get("status", "FAILED")
+        pc_coins = pc_res.get("coins", 0)
+        mobile_coins = mobile_res.get("coins", 0)
+        pc_streak = pc_res.get("streak", 0)
+        mobile_streak = mobile_res.get("streak", 0)
+
+        # Якщо на мобільному спрацювала капча
+        if mobile_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
+            if pc_status in ("SUCCESS", "ALREADY_DONE"):
+                logger.warning(f"[{self.account_name}] 🧩 Канал Mobile вимагає капчі, але чекін на PC вже успішно зараховано ({pc_status})!")
+                mobile_status = "CAPTCHA_REQUIRED"
+            else:
+                self.status = "CAPTCHA_REQUIRED"
                 return False
 
-        # 5. Отримання точного балансу монет через mtop.aliexpress.coin.execute
+        # Якщо на мобільному повернуто SESSION_EXPIRED
+        if mobile_res.get("status") == "SESSION_EXPIRED" or not self.session_valid:
+            if pc_status in ("SUCCESS", "ALREADY_DONE"):
+                logger.warning(f"[{self.account_name}] ⚠️ Канал Mobile повернув недійсну сесію, але чекін на PC вже успішно зараховано ({pc_status})!")
+                self.session_valid = True
+                mobile_status = "SESSION_EXPIRED"
+            else:
+                self.status = "SESSION_EXPIRED"
+                return False
+
+        # 3. Визначення підсумкового статусу
+        if pc_status == "SUCCESS" or mobile_status == "SUCCESS":
+            self.status = "SUCCESS"
+        elif pc_status == "ALREADY_DONE" or mobile_status == "ALREADY_DONE":
+            self.status = "ALREADY_DONE"
+        else:
+            self.status = "FAILED"
+
+        # 4. Об'єднання зароблених монет: якщо обидва канали показують ALREADY_DONE, не дублюємо нагороду
+        if pc_status == "ALREADY_DONE" and mobile_status == "ALREADY_DONE":
+            self.coins_earned = max(pc_coins, mobile_coins)
+        else:
+            self.coins_earned = pc_coins + mobile_coins
+
+        # 5. Встановлення стріку (найвищий активний стрік, з пріоритетом мобільного якщо вищий або однаковий)
+        if mobile_streak > 0 and pc_streak > 0:
+            self.streak_days = mobile_streak if mobile_streak >= pc_streak else pc_streak
+        elif mobile_streak > 0:
+            self.streak_days = mobile_streak
+        elif pc_streak > 0:
+            self.streak_days = pc_streak
+        else:
+            self.streak_days = 0
+
+        # Збереження деталізованої інформації по каналах
+        self.pc_status = pc_status
+        self.mobile_status = mobile_status
+
+        logger.info(
+            f"[{self.account_name}] 📊 Підсумок Dual-Channel чекіну: Статус={self.status}, "
+            f"Стрік={self.streak_days} дн., Зароблено=+{self.coins_earned} 🪙 "
+            f"(PC: {pc_status} +{pc_coins}🪙, Mobile: {mobile_status} +{mobile_coins}🪙)"
+        )
+
+        # 6. Отримання точного балансу монет через mtop.aliexpress.coin.execute
         self._fetch_coin_balance()
 
         return self.status in ("SUCCESS", "ALREADY_DONE")
+
 
     def _fetch_coin_balance(self):
         """Отримує точний баланс монет через mtop.aliexpress.coin.execute (scene: 'UserCoinNum')."""

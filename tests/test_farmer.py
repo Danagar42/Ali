@@ -22,7 +22,8 @@ from src.checkin import (
     is_checkin_success,
     is_already_checked_in,
     is_captcha_required,
-    CheckinManager
+    CheckinManager,
+    MOBILE_CHECKIN_APIS
 )
 from src.coins import CoinsFarmManager, REPORT_TASK_URLS
 from src.coupons import CouponCollector
@@ -1662,6 +1663,628 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             reported = mgr._report_task_complete("BROWSE_ITEM", "task1")
             self.assertFalse(reported)
             self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
+
+
+class TestDualChannelCheckin(unittest.TestCase):
+    def test_mobile_checkin_success_and_streak_coins_extraction(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_mobile_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": True,
+                    "signDays": 3,
+                    "signList": [{"days": 3, "coins": 15}]
+                }
+            }
+        }
+        mobile_res = {
+            "api": "mtop.aliexpress.growth.bonus.daily.signin",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "day": 4,
+                    "coins": 25,
+                    "amount": 25,
+                    "streak": 4
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "ALREADY_DONE")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 40)  # 15 from PC already done + 25 from fresh Mobile
+            self.assertEqual(mgr.streak_days, 4, "Mobile streak 4 must be prioritized over PC streak 3!")
+
+    def test_mobile_checkin_already_done_scenario(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_mobile_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": True,
+                    "signDays": 2
+                }
+            }
+        }
+        mobile_res = {
+            "api": "mtop.aliexpress.growth.bonus.daily.signin",
+            "ret": ["SUCCESS_REPEAT_CHECKIN::already checked"],
+            "data": {
+                "signToday": True,
+                "streak": 5,
+                "coins": 0
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.pc_status, "ALREADY_DONE")
+            self.assertEqual(mgr.mobile_status, "ALREADY_DONE")
+            self.assertEqual(mgr.streak_days, 5, "Mobile streak 5 must be prioritized when both channels are already done!")
+
+    def test_dual_channel_both_succeed_sums_coins_and_selects_best_streak(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_dual_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 2
+                }
+            }
+        }
+        pc_sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 3,
+                    "coins": 20
+                }
+            }
+        }
+        mobile_res = {
+            "api": "mtop.aliexpress.growth.bonus.daily.signin",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "day": 5,
+                    "awardCoins": 30
+                }
+            }
+        }
+        balance_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "data": [{"name": "userCoinsNum", "value": "1,250"}]
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return pc_sign_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_res
+                if api == "mtop.aliexpress.coin.execute":
+                    return balance_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 50, "Coins earned must be sum of PC (20) and Mobile (30)!")
+            self.assertEqual(mgr.streak_days, 5, "Streak must be 5 (highest active streak from mobile)!")
+            self.assertEqual(mgr.total_coins, 1250, "End-of-run balance must be updated from _fetch_coin_balance!")
+
+    def test_mobile_fallback_across_growth_endpoints(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_fallback_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 1
+                }
+            }
+        }
+        pc_sign_res = {
+            "ret": ["FAIL_SYS_SERVICE_NOT_AVAILABLE::Not available"]
+        }
+        # Endpoint 1: Deprecated
+        mobile_res_1 = {"ret": ["FAIL_BIZ_API_DEPRECATED::deprecated"]}
+        # Endpoint 2: None / Network failure
+        mobile_res_2 = None
+        # Endpoint 3: Success!
+        mobile_res_3 = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "consecutiveDays": 4,
+                    "rewardCoins": 35
+                }
+            }
+        }
+
+        calls_made = []
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                calls_made.append(api)
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return pc_sign_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_res_1
+                if api == "mtop.aliexpress.growth.coin.sign.in":
+                    return mobile_res_2
+                if api == "mtop.aliexpress.growth.coin.signin":
+                    return mobile_res_3
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "FAILED")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 35)
+            self.assertEqual(mgr.streak_days, 4)
+            self.assertIn("mtop.aliexpress.growth.bonus.daily.signin", calls_made)
+            self.assertIn("mtop.aliexpress.growth.coin.sign.in", calls_made)
+            self.assertIn("mtop.aliexpress.growth.coin.signin", calls_made)
+
+    def test_mobile_captcha_handling_aborts_immediately(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_captcha_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["FAIL_SYS_SERVICE_TIMEOUT::Service timeout"]
+        }
+        mobile_captcha_res = {
+            "ret": ["FAIL_SYS_USER_VALIDATE::need validate"],
+            "data": {
+                "url": "https://acs.aliexpress.com/_____tmd_____/punish?x=captcha_required"
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(mgr, "_fetch_coin_balance") as mock_balance, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return pc_status_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_captcha_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+            mock_balance.assert_not_called()
+
+    def test_mobile_session_expired_handling(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_expired_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["FAIL_SYS_SERVICE_TIMEOUT::Service timeout"]
+        }
+        mobile_session_expired_res = {
+            "ret": ["FAIL_SYS_USER_NOT_LOGIN::Not logged in"]
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return pc_status_res
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_session_expired_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "SESSION_EXPIRED")
+            self.assertFalse(mgr.session_valid)
+
+    def test_dual_channel_both_fail_returns_failed(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_both_fail_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_call_mtop", return_value=None), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "FAILED")
+            self.assertEqual(mgr.pc_status, "FAILED")
+            self.assertEqual(mgr.mobile_status, "FAILED")
+            self.assertEqual(mgr.coins_earned, 0)
+            self.assertEqual(mgr.streak_days, 0)
+
+    def test_mobile_extract_data_nested_and_string_values(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_nested_123"})
+        mgr = CheckinManager(client)
+
+        nested_response = {
+            "data": {
+                "signInResult": {
+                    "consecutiveDays": " 6 ",
+                    "bonusAmount": " 45.0 "
+                }
+            }
+        }
+        coins, streak = mgr._extract_mobile_data(nested_response)
+        self.assertEqual(coins, 45)
+        self.assertEqual(streak, 6)
+
+        # signToday == False prevents coin extraction
+        pre_checkin_response = {
+            "data": {
+                "signToday": False,
+                "days": 3,
+                "coins": 20
+            }
+        }
+        coins, streak = mgr._extract_mobile_data(pre_checkin_response)
+        self.assertEqual(coins, 0, "signToday: False must suppress old coins!")
+        self.assertEqual(streak, 3)
+
+    def test_pc_succeeds_and_mobile_fails_still_gives_success(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_pc_ok_123"})
+        mgr = CheckinManager(client)
+
+        pc_status_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signToday": False,
+                    "signDays": 3
+                }
+            }
+        }
+        pc_sign_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "signDays": 4,
+                    "coins": 20
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return pc_status_res
+                if api == "mtop.aliexpress.coin.pc.sign":
+                    return pc_sign_res
+                # all mobile endpoints fail
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "FAILED")
+            self.assertEqual(mgr.coins_earned, 20)
+            self.assertEqual(mgr.streak_days, 4)
+
+    def test_pc_fails_and_mobile_succeeds_gives_success(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_mobile_ok_123"})
+        mgr = CheckinManager(client)
+
+        mobile_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "data": {
+                    "day": 6,
+                    "coins": 35
+                }
+            }
+        }
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_res
+                # all PC endpoints fail
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.pc_status, "FAILED")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 35)
+            self.assertEqual(mgr.streak_days, 6)
+
+    def test_mobile_fresh_checkin_with_has_signin_true_and_award_coins_is_success(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_fresh_123"})
+        mgr = CheckinManager(client)
+
+        fresh_mobile_res = {
+            "api": "mtop.aliexpress.growth.bonus.daily.signin",
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "hasSignIn": True,
+                "streak": 4,
+                "awardCoins": 25
+            }
+        }
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return None
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return fresh_mobile_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS", "Fresh checkin with awardCoins must be SUCCESS, not ALREADY_DONE!")
+            self.assertEqual(mgr.mobile_status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 25)
+            self.assertEqual(mgr.streak_days, 4)
+
+    def test_mobile_negative_has_signin_suppresses_coins_and_triggers_fallback(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_fallback_neg_123"})
+        mgr = CheckinManager(client)
+
+        # Endpoint 1 returns preview info with hasSignIn: False and preview coins
+        mobile_info_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "hasSignIn": False,
+                "streak": 2,
+                "coins": 20
+            }
+        }
+        # Endpoint 2 executes real checkin
+        mobile_real_checkin_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "hasSignIn": True,
+                "streak": 3,
+                "awardCoins": 25
+            }
+        }
+
+        calls_made = []
+        with patch.object(mgr, "_call_mtop") as mock_mtop, \
+             patch.object(client, "get", return_value=MagicMock(status_code=200, text="")):
+            def mock_call(api, data=None):
+                calls_made.append(api)
+                if api == "mtop.aliexpress.coin.pc.sign.list":
+                    return None
+                if api == "mtop.aliexpress.growth.bonus.daily.signin":
+                    return mobile_info_res
+                if api == "mtop.aliexpress.growth.coin.sign.in":
+                    return mobile_real_checkin_res
+                return None
+            mock_mtop.side_effect = mock_call
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.coins_earned, 25, "Must earn coins from real endpoint 2, not preview coins from endpoint 1!")
+            self.assertEqual(mgr.streak_days, 3)
+            self.assertIn("mtop.aliexpress.growth.bonus.daily.signin", calls_made)
+            self.assertIn("mtop.aliexpress.growth.coin.sign.in", calls_made)
+
+    def test_mobile_extract_data_list_wrapped_payload(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_list_wrap_123"})
+        mgr = CheckinManager(client)
+
+        list_payload = {
+            "data": [
+                {
+                    "day": 5,
+                    "awardCoins": 30
+                }
+            ]
+        }
+        coins, streak = mgr._extract_mobile_data(list_payload)
+        self.assertEqual(coins, 30)
+        self.assertEqual(streak, 5)
+
+    def test_mobile_extract_data_prefers_reward_coins_over_total_coin_count(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_coins_pref_123"})
+        mgr = CheckinManager(client)
+
+        payload_with_balance = {
+            "data": {
+                "awardCoins": 25,
+                "coinCount": 5420,
+                "streak": 4
+            }
+        }
+        coins, streak = mgr._extract_mobile_data(payload_with_balance)
+        self.assertEqual(coins, 25, "awardCoins (25) must take precedence over total coinCount balance (5420)!")
+        self.assertEqual(streak, 4)
+
+    def test_is_checkin_success_rejects_all_negative_signin_flags(self):
+        from src.checkin import is_checkin_success
+        negative_flags = [
+            {"signToday": False},
+            {"hasSignIn": False},
+            {"isSignInToday": False},
+            {"hasSigned": False},
+            {"alreadySign": False},
+            {"signed": False}
+        ]
+        for flag in negative_flags:
+            res = {
+                "ret": ["SUCCESS::ok"],
+                "data": {
+                    "success": True,
+                    **flag
+                }
+            }
+    def test_is_checkin_success_rejects_nested_has_signin_false_and_error_code(self):
+        from src.checkin import is_checkin_success
+        payload_nested_false = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "signInResult": {
+                    "hasSignIn": False,
+                    "errorCode": "USER_NOT_ELIGIBLE"
+                }
+            }
+        }
+        self.assertFalse(is_checkin_success(payload_nested_false), "Must reject nested hasSignIn: False and errorCode!")
+
+        payload_nested_err = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "success": True,
+                "module": {
+                    "errorMsg": "Rate limit exceeded"
+                }
+            }
+        }
+        self.assertFalse(is_checkin_success(payload_nested_err), "Must reject nested errorMsg!")
+
+    def test_dual_channel_mobile_captcha_does_not_fail_successful_pc_checkin(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 20, "streak": 5}), \
+             patch.object(mgr, "_run_mobile_checkin", return_value={"status": "CAPTCHA_REQUIRED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok, "PC success must not be invalidated by mobile captcha!")
+            self.assertEqual(mgr.status, "SUCCESS")
+            self.assertEqual(mgr.mobile_status, "CAPTCHA_REQUIRED")
+            self.assertEqual(mgr.coins_earned, 20)
+            self.assertEqual(mgr.streak_days, 5)
+
+    def test_dual_channel_mobile_session_expired_does_not_invalidate_valid_pc_checkin(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 15, "streak": 4}), \
+             patch.object(mgr, "_run_mobile_checkin", return_value={"status": "SESSION_EXPIRED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok, "PC already done must not be invalidated by mobile session expired!")
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertTrue(mgr.session_valid)
+            self.assertEqual(mgr.mobile_status, "SESSION_EXPIRED")
+
+    def test_dual_channel_both_already_done_does_not_double_count_coins(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 15, "streak": 3}), \
+             patch.object(mgr, "_run_mobile_checkin", return_value={"status": "ALREADY_DONE", "coins": 15, "streak": 3}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.coins_earned, 15, "Coins must not be doubled (15 + 15 = 30) on repeat ALREADY_DONE runs!")
+
+    def test_warmup_html_already_done_extracts_coins_from_sign_list(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mgr = CheckinManager(client)
+
+        html_text = '<script>window.runParams = { totalCoins: 500, streak: 3, isSign: true };</script>'
+        resp_html = MagicMock(status_code=200, text=html_text, url="https://www.aliexpress.com/p/coin-pc-index/index.html")
+
+        sign_list_data = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "signList": [{"days": 3, "coins": 25}]
+            }
+        }
+
+        with patch.object(client, "get", return_value=resp_html), \
+             patch.object(mgr, "_parse_coin_page_html", return_value=True), \
+             patch.object(mgr, "_call_mtop", return_value=sign_list_data):
+            mgr.streak_days = 3
+            res = mgr._run_pc_checkin()
+            self.assertEqual(res["status"], "ALREADY_DONE")
+            self.assertEqual(res["coins"], 25, "Must extract coins from sign.list on warmup HTML ALREADY_DONE!")
+
+    def test_is_already_checked_in_rejects_captcha_and_session_expired(self):
+        from src.checkin import is_already_checked_in
+        res_captcha = {
+            'ret': ['RGV587_RUN_SCRIPT::Security verification required'], 
+            'data': {'url': 'https://sec.aliexpress.com/_____tmd_____/punish', 'signed': True}
+        }
+        self.assertFalse(is_already_checked_in(res_captcha), "Captcha must not be diagnosed as ALREADY_DONE!")
+
+        res_expired = {
+            'ret': ['FAIL_SYS_USER_NOT_LOGIN::Session expired, already checked before'], 
+            'data': {}
+        }
+        self.assertFalse(is_already_checked_in(res_expired), "Expired session must not be diagnosed as ALREADY_DONE!")
 
 
 if __name__ == "__main__":
