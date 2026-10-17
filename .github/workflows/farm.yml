@@ -2,8 +2,10 @@ name: AliExpress Daily Farm
 
 on:
   schedule:
-    # Запуск щодня о 08:00 UTC (11:00 за Києвом влітку / 10:00 взимку)
-    - cron: '0 8 * * *'
+    # Основний запуск щодня о 12:09 за Києвом (09:09 UTC)
+    - cron: '9 9 * * *'
+    # Резервний контрольний запуск о 17:09 за Києвом (14:09 UTC)
+    - cron: '9 14 * * *'
   workflow_dispatch:
     # Можливість запустити вручну з вкладки Actions у GitHub
 
@@ -30,7 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run AliExpress Farmer
+      - name: Run AliExpress Farmer (with auto-retry)
         env:
           # Пропускаємо довгу паузу при ручному запуску через кнопку
           SKIP_RANDOM_SLEEP: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
@@ -65,4 +67,16 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python -m src.main
+          max_attempts=3
+          attempt=1
+          until python -m src.main; do
+            exit_code=$?
+            if [ $attempt -ge $max_attempts ]; then
+              echo "❌ Усі $max_attempts спроби завершилися з помилкою."
+              exit $exit_code
+            fi
+            echo "⚠️ Спроба $attempt завершилася невдало. Очікування 60с перед повторним запуском..."
+            sleep 60
+            export SKIP_RANDOM_SLEEP=1
+            attempt=$((attempt + 1))
+          done
