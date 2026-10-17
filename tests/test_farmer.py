@@ -4397,6 +4397,140 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             sent_text = mock_post.call_args[1]["json"]["text"]
             self.assertIn("Немає акаунтів", sent_text)
 
+    def test_materials_parsing_extracts_main_title_behavior_config_and_real_url(self):
+        """Перевіряє коректний парсинг mainTitle з видаленням \\n, behaviorConfig та реального URL без fallback."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        mock_res = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "result": [
+                    {
+                        "groupId": 548001,
+                        "materials": [
+                            {
+                                "mainTitle": "Browse specialized deals\n",
+                                "instanceStatus": 0,
+                                "interestCode": "5PX4SF8J",
+                                "taskType": 1,
+                                "behaviorConfig": json.dumps({"duration": 20, "url": "https://aliexpress.com/deals/special.html"}),
+                                "actionUrl": ""
+                            },
+                            {
+                                "mainTitle": "Daily check-in\n",
+                                "instanceStatus": 0,
+                                "interestCode": "CHECKIN_CODE",
+                                "taskType": 0,
+                                "actionUrl": ""
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        with patch.object(checkin_mgr, "_call_mtop", return_value=mock_res):
+            tasks = coins_mgr.fetch_active_tasks()
+            self.assertEqual(len(tasks), 2)
+            t1 = tasks[0]
+            self.assertEqual(t1["taskTitle"], "Browse specialized deals")
+            self.assertEqual(t1["actionUrl"], "https://aliexpress.com/deals/special.html")
+            self.assertEqual(t1["staySeconds"], 20)
+            self.assertEqual(t1["groupId"], 548001)
+            self.assertEqual(t1["interestCode"], "5PX4SF8J")
+            self.assertEqual(t1["instanceStatus"], 0)
+            self.assertEqual(t1["taskType"], 1)
+
+            t2 = tasks[1]
+            self.assertEqual(t2["taskTitle"], "Daily check-in")
+            self.assertEqual(t2["actionUrl"], "")
+            self.assertEqual(t2["staySeconds"], 15)
+
+    def test_is_safe_task_allows_type_1_and_3_and_filters_unsafe_and_inactive(self):
+        """Перевіряє, що Тип 1 та 3 дозволені, а instanceStatus != 0 та Daily check-in без URL відхиляються."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        coins_mgr = CoinsFarmManager(client)
+
+        # 1. Безпечне завдання Type 1 з URL
+        task_type_1 = {
+            "taskTitle": "Browse items for 15s",
+            "taskType": 1,
+            "actionUrl": "https://aliexpress.com/category/1000.html",
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertTrue(coins_mgr.is_safe_task(task_type_1))
+
+        # 2. Безпечне завдання Type 3 з URL
+        task_type_3 = {
+            "taskTitle": "Browse brand channel",
+            "taskType": 3,
+            "actionUrl": "https://aliexpress.com/channel/top.html",
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertTrue(coins_mgr.is_safe_task(task_type_3))
+
+        # 3. Daily check-in без URL -> має бути відхилено
+        daily_checkin = {
+            "taskTitle": "Daily check-in",
+            "taskType": 0,
+            "actionUrl": "",
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(daily_checkin))
+
+        # 4. Неактивне завдання (instanceStatus = 1) -> має бути відхилено
+        inactive_task = {
+            "taskTitle": "Browse items for 15s",
+            "taskType": 1,
+            "actionUrl": "https://aliexpress.com/category/1000.html",
+            "instanceStatus": 1,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(inactive_task))
+
+        # 5. Завдання з небезпечним ключовим словом (buy / purchase) -> має бути відхилено
+        unsafe_task = {
+            "taskTitle": "Place order and buy item",
+            "taskType": 1,
+            "actionUrl": "https://aliexpress.com/item/1.html",
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(unsafe_task))
+
+    def test_complete_and_claim_payloads_include_group_id_and_interest_code(self):
+        """Перевіряє включення groupId та interestCode в MTOP-пейлоади complete та claim."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        task_data = {
+            "taskInstanceId": "inst_task_test",
+            "groupId": 548001,
+            "interestCode": "5PX4SF8J",
+            "taskType": 1,
+            "status": "todo"
+        }
+
+        with patch.object(checkin_mgr, "_call_mtop", return_value={"ret": ["SUCCESS::ok"], "data": {"success": True, "awardCoins": 15}}) as mock_call:
+            ok = coins_mgr._complete_task(task_data)
+            self.assertTrue(ok)
+            call_kwargs = mock_call.call_args[1]
+            self.assertEqual(call_kwargs["data"]["groupId"], 548001)
+            self.assertEqual(call_kwargs["data"]["interestCode"], "5PX4SF8J")
+
+            mock_call.reset_mock()
+            coins = coins_mgr._claim_task_reward(task_data)
+            self.assertEqual(coins, 15)
+            call_kwargs_claim = mock_call.call_args[1]
+            self.assertEqual(call_kwargs_claim["data"]["groupId"], 548001)
+            self.assertEqual(call_kwargs_claim["data"]["interestCode"], "5PX4SF8J")
+
 
 if __name__ == "__main__":
     unittest.main()

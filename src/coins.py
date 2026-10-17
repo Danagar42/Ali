@@ -50,7 +50,7 @@ UNSAFE_KEYWORDS = (
 )
 
 # Безпечні типи завдань (тільки пасивний перегляд / очікування 15 секунд)
-SAFE_TASK_TYPES = {0, "0", "browse", "browse_item", "search", "view"}
+SAFE_TASK_TYPES = {0, "0", 1, "1", 3, "3", "browse", "browse_item", "search", "view"}
 SAFE_KEYWORDS = (
     "browse", "view", "explore", "visit", "check", "find",
     "15s", "30s", "15 sec", "секунд", "перегляд", "пошук", "coins"
@@ -253,14 +253,7 @@ class CoinsFarmManager:
                     else:
                         return []
 
-                # Виводимо повну структуру отриманого JSON (data) при успішній відповіді
                 data_field = mtop_res.get("data")
-                try:
-                    data_json_str = json.dumps(data_field, ensure_ascii=False)
-                except Exception:
-                    data_json_str = str(data_field)
-                logger.info(f"[{self.account_name}] 📋 Повна структура 'data' від {TASK_DELIVERY_QUERY_API}: {data_json_str}")
-
                 raw_items = []
                 candidate_dicts = [mtop_res]
                 if isinstance(data_field, dict):
@@ -285,19 +278,137 @@ class CoinsFarmManager:
                         raw_items = sub_list
 
                 if raw_items:
+                    # Логуємо кожен елемент масиву materials окремим рядком без скорочення
+                    logger.info(f"[{self.account_name}] 📋 MTOP отримано елементів завдань: {len(raw_items)}")
+                    for idx, it in enumerate(raw_items, 1):
+                        if not isinstance(it, dict):
+                            continue
+                        mats = it.get("materials")
+                        if isinstance(mats, list) and mats:
+                            for m_idx, m in enumerate(mats, 1):
+                                if isinstance(m, dict):
+                                    try:
+                                        m_str = json.dumps(m, ensure_ascii=False)
+                                    except Exception:
+                                        m_str = str(m)
+                                    logger.info(f"[{self.account_name}]   [Завдання #{idx}.{m_idx}] materials: {m_str}")
+                        else:
+                            try:
+                                it_str = json.dumps(it, ensure_ascii=False)
+                            except Exception:
+                                it_str = str(it)
+                            logger.info(f"[{self.account_name}]   [Завдання #{idx}] data: {it_str}")
+
                     normalized = []
+                    # Збираємо пари (it, mat) для обробки
+                    task_pairs = []
                     for it in raw_items:
                         if not isinstance(it, dict):
                             continue
-                        materials = it.get("materials") or []
-                        mat = materials[0] if (isinstance(materials, list) and materials and isinstance(materials[0], dict)) else {}
+                        mats = it.get("materials")
+                        if isinstance(mats, list) and mats and isinstance(mats[0], dict) and (len(mats) > 1 or not (it.get("taskInstanceId") or it.get("taskId") or it.get("id"))):
+                            for m in mats:
+                                if isinstance(m, dict):
+                                    task_pairs.append((it, m))
+                        else:
+                            mat = mats[0] if (isinstance(mats, list) and mats and isinstance(mats[0], dict)) else {}
+                            task_pairs.append((it, mat))
 
-                        task_id = it.get("taskInstanceId") or it.get("taskId") or it.get("id") or mat.get("taskInstanceId") or mat.get("taskId")
-                        status = mat.get("newTaskStatus") or it.get("status") or ("completed" if it.get("completed") else "todo")
-                        task_type = mat.get("taskType") if mat.get("taskType") is not None else it.get("taskType", 0)
-                        title = mat.get("taskTitle") or mat.get("title") or it.get("taskTitle") or it.get("title") or f"Task_{task_id}"
-                        action_url = mat.get("actionUrl") or mat.get("taskAction") or it.get("actionUrl") or BROWSE_TARGETS[0]
+                    for it, mat in task_pairs:
+                        # Розпаршуємо behaviorConfig (якщо це JSON-рядок)
+                        cfg = {}
+                        behavior_raw = mat.get("behaviorConfig") or it.get("behaviorConfig")
+                        if isinstance(behavior_raw, str) and behavior_raw.strip():
+                            try:
+                                cfg = json.loads(behavior_raw)
+                            except Exception:
+                                cfg = {}
+                        elif isinstance(behavior_raw, dict):
+                            cfg = behavior_raw
+
+                        task_id = (
+                            it.get("taskInstanceId")
+                            or it.get("taskId")
+                            or it.get("id")
+                            or mat.get("taskInstanceId")
+                            or mat.get("taskId")
+                            or mat.get("id")
+                            or mat.get("materialId")
+                        )
+                        status = (
+                            mat.get("newTaskStatus")
+                            or mat.get("status")
+                            or it.get("status")
+                            or ("completed" if it.get("completed") else "todo")
+                        )
+                        task_type = (
+                            mat.get("taskType")
+                            if mat.get("taskType") is not None
+                            else (
+                                it.get("taskType")
+                                if it.get("taskType") is not None
+                                else (
+                                    mat.get("type")
+                                    if mat.get("type") is not None
+                                    else (
+                                        it.get("type")
+                                        if it.get("type") is not None
+                                        else cfg.get("type", 0)
+                                    )
+                                )
+                            )
+                        )
+
+                        # Назва завдання: зчитуємо mainTitle, subTitle, title, taskName
+                        raw_title = (
+                            mat.get("mainTitle")
+                            or mat.get("subTitle")
+                            or mat.get("taskTitle")
+                            or mat.get("title")
+                            or mat.get("taskName")
+                            or it.get("taskTitle")
+                            or it.get("title")
+                            or it.get("taskName")
+                            or f"Task_{task_id}"
+                        )
+                        title = str(raw_title).replace("\r", " ").replace("\n", " ").strip()
+
+                        # URL завдання: шукаємо реальний URL, НЕ підставляємо дефолтний women-clothing!
+                        action_url = (
+                            mat.get("actionUrl")
+                            or mat.get("materialUrl")
+                            or mat.get("targetUrl")
+                            or mat.get("jumpUrl")
+                            or mat.get("url")
+                            or mat.get("taskAction")
+                            or cfg.get("url")
+                            or cfg.get("actionUrl")
+                            or cfg.get("targetUrl")
+                            or it.get("actionUrl")
+                            or it.get("materialUrl")
+                            or it.get("targetUrl")
+                            or it.get("jumpUrl")
+                            or it.get("url")
+                            or ""
+                        )
+                        action_url = str(action_url).strip()
+
+                        # Тривалість перегляду (staySeconds)
+                        stay_seconds = (
+                            _clean_int(cfg.get("duration"))
+                            or _clean_int(cfg.get("staySeconds"))
+                            or _clean_int(mat.get("staySeconds"))
+                            or _clean_int(it.get("staySeconds"))
+                            or 15
+                        )
+
                         un_issue = mat.get("unIssueRecord") or it.get("unIssueRecord")
+                        instance_status = mat.get("instanceStatus")
+                        if instance_status is None:
+                            instance_status = it.get("instanceStatus", 0)
+
+                        group_id = it.get("groupId") or mat.get("groupId")
+                        interest_code = mat.get("interestCode") or it.get("interestCode")
 
                         normalized.append({
                             "taskId": task_id,
@@ -306,12 +417,16 @@ class CoinsFarmManager:
                             "projectAppKey": it.get("projectAppKey") or PROJECT_APP_KEY,
                             "taskSceneId": it.get("taskSceneId") or TASK_SCENE_ID,
                             "sceneId": it.get("sceneId") or TASK_SCENE_ID,
+                            "groupId": group_id,
+                            "interestCode": interest_code,
+                            "instanceStatus": instance_status,
                             "taskType": task_type,
                             "taskTitle": title,
                             "status": str(status).lower(),
                             "unIssueRecord": un_issue,
-                            "staySeconds": _clean_int(mat.get("staySeconds")) or 15,
+                            "staySeconds": stay_seconds,
                             "actionUrl": action_url,
+                            "behaviorConfig": cfg,
                             "locale": it.get("locale") or locale,
                             "_lang": it.get("_lang") or lang,
                             "_currency": it.get("_currency") or currency,
@@ -324,9 +439,9 @@ class CoinsFarmManager:
 
                     if normalized:
                         self.status = "SUCCESS"
-                        logger.info(f"[{self.account_name}] 📋 MTOP знайдено завдань платформи: {len(normalized)}")
+                        logger.info(f"[{self.account_name}] 📋 MTOP нормалізовано завдань платформи: {len(normalized)}")
                         for idx, t in enumerate(normalized, 1):
-                            logger.info(f"[{self.account_name}]   [{idx}] ID: {t.get('taskId')} | '{t.get('taskTitle')}' | Статус: {t.get('status')} | Тип: {t.get('taskType')} | Час: {t.get('staySeconds')}с | URL: {t.get('actionUrl')}")
+                            logger.info(f"[{self.account_name}]   [{idx}] ID: {t.get('taskId')} | '{t.get('taskTitle')}' | Статус: {t.get('status')} | Тип: {t.get('taskType')} | Час: {t.get('staySeconds')}с | URL: {t.get('actionUrl') or '-'}")
                         return normalized
 
                 # Якщо відповідь SUCCESS, але список завдань порожній
@@ -386,7 +501,7 @@ class CoinsFarmManager:
 
     def is_safe_task(self, task: Dict[str, Any]) -> bool:
         """
-        Жорсткий фільтр безпеки: повертає True ТІЛЬКИ для повністю безпечних пасивних завдань
+        Жорсткий фільтр безпеки: повертає True для безпечних пасивних завдань
         (перегляд сторінок/товарів ~15 секунд або забирання вже готової нагороди).
         Всі покупки, додавання в кошик, підписки чи зовнішні шери відхиляються.
         """
@@ -396,6 +511,12 @@ class CoinsFarmManager:
         status = str(task.get("status", "")).lower()
         if status in ("completed", "finished", "done"):
             return False
+
+        # Відсіюємо завдання, де instanceStatus != 0 (якщо це не готова нагорода)
+        instance_status = task.get("instanceStatus")
+        if instance_status is not None and _clean_int(instance_status) not in (0, None):
+            if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
+                return False
 
         # Об'єднуємо всі текстові поля для перевірки на заборонені дії
         text_repr = " ".join([
@@ -410,11 +531,17 @@ class CoinsFarmManager:
             logger.debug(f"[{self.account_name}] 🚫 Пропущено небезпечне завдання: {task.get('taskTitle')}")
             return False
 
+        # Відсіюємо "Daily check-in" без URL для перегляду (він виконується в модулі checkin)
+        task_title_lower = str(task.get("taskTitle", "")).lower()
+        if "daily check" in task_title_lower and not task.get("actionUrl"):
+            logger.debug(f"[{self.account_name}] ℹ️ Пропущено 'Daily check-in' без URL перегляду: {task.get('taskTitle')}")
+            return False
+
         # Якщо завдання вже виконане і очікує лише клейму (waitForReceive) — безпечно забрати монети!
         if status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord")):
             return True
 
-        # Перевірка на безпечний тип завдання перегляду
+        # Перевірка на безпечний тип завдання перегляду (включаючи Тип: 1 та Тип: 3)
         raw_type = task.get("taskType")
         if raw_type in SAFE_TASK_TYPES or str(raw_type).lower() in SAFE_TASK_TYPES:
             return True
@@ -502,10 +629,15 @@ class CoinsFarmManager:
                         str(t.get("actionUrl", "")),
                         str(t.get("actionType", ""))
                     ]).lower()
-                    if t_status_str in ("completed", "finished", "done"):
+                    instance_status = t.get("instanceStatus")
+                    if instance_status is not None and _clean_int(instance_status) not in (0, None) and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
+                        reason = f"Неактивний статус (instanceStatus={instance_status})"
+                    elif t_status_str in ("completed", "finished", "done"):
                         reason = "Вже виконано раніше"
                     elif any(bw in text_repr for bw in UNSAFE_KEYWORDS):
                         reason = "Небезпечна дія (покупка/підписка/кошик)"
+                    elif "daily check" in t_title.lower() and not t.get("actionUrl"):
+                        reason = "Щоденний чекін без URL для перегляду"
                     else:
                         reason = "Фільтр безпеки: непідтримуваний тип"
                     self.task_records.append({
@@ -562,14 +694,16 @@ class CoinsFarmManager:
                         continue
 
                     # Виконання завдання з очікуванням 15-18 секунд
-                    target_url = task.get("actionUrl") or random.choice(BROWSE_TARGETS)
+                    target_url = task.get("actionUrl")
                     stay_seconds = max(15, min(task.get("staySeconds", 15), 30))
-                    logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(tasks_to_run)}] [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек)...")
-
-                    try:
-                        self.client.get(target_url)
-                    except Exception as e:
-                        logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
+                    if target_url:
+                        logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(tasks_to_run)}] [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {target_url}...")
+                        try:
+                            self.client.get(target_url)
+                        except Exception as e:
+                            logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
+                    else:
+                        logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(tasks_to_run)}] [Безпечне завдання] '{title}': пасивне очікування ({stay_seconds} сек)...")
 
                     # Реальна пауза 15-18 секунд для зарахування перегляду на сервері AliExpress
                     self.client.sleep_random(stay_seconds + 0.2, stay_seconds + 2.5)
@@ -710,9 +844,18 @@ class CoinsFarmManager:
             "lang": task.get("lang", task.get("_lang", lang)),
             "currency": task.get("currency", task.get("_currency", currency))
         }
+        if task.get("groupId"):
+            payload["groupId"] = task["groupId"]
+        if task.get("interestCode"):
+            payload["interestCode"] = task["interestCode"]
 
         try:
             res = self.checkin_mgr._call_mtop(TASK_PROCESS_COMPLETE_API, data=payload)
+            try:
+                res_str = json.dumps(res, ensure_ascii=False)
+            except Exception:
+                res_str = str(res)
+            logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _complete_task ({task_id}): {res_str}")
             if res and isinstance(res, dict):
                 if _is_task_success(res):
                     return True
@@ -759,9 +902,18 @@ class CoinsFarmManager:
             "lang": task.get("lang", task.get("_lang", lang)),
             "currency": task.get("currency", task.get("_currency", currency))
         }
+        if task.get("groupId"):
+            payload["groupId"] = task["groupId"]
+        if task.get("interestCode"):
+            payload["interestCode"] = task["interestCode"]
 
         try:
             res = self.checkin_mgr._call_mtop(TASK_PROCESS_ISSUE_API, data=payload)
+            try:
+                res_str = json.dumps(res, ensure_ascii=False)
+            except Exception:
+                res_str = str(res)
+            logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _claim_task_reward ({task_id}): {res_str}")
             if res and isinstance(res, dict):
                 if _is_task_success(res):
                     coins = 0
