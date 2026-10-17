@@ -3881,8 +3881,526 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
                 self.assertNotIn("women-clothing", called_url)
 
 
+class TestDetailedFarmerReporting(unittest.TestCase):
+    """
+    Тести для точного, деталізованого та правильного звіту фермера (GitHub Step Summary та Telegram).
+    """
+
+    def setUp(self):
+        CoinsFarmManager.reset_dead_urls()
+        CouponCollector.reset_dead_endpoints()
+
+    def tearDown(self):
+        CoinsFarmManager.reset_dead_urls()
+        CouponCollector.reset_dead_endpoints()
+
+    def test_account_summary_auto_computes_initial_coins_and_checkin_coins(self):
+        from src.notifications import AccountSummary
+        summary = AccountSummary(
+            name="Acc_Auto",
+            checkin_status="SUCCESS",
+            coins_earned=50,
+            total_coins=1000,
+            pc_coins=20,
+            mobile_coins=15,
+            tasks_coins=15
+        )
+        self.assertEqual(summary.initial_coins, 950)
+        self.assertEqual(summary.checkin_coins, 35)
+
+    def test_account_summary_deduces_checkin_coins_without_channel_breakdown(self):
+        from src.notifications import AccountSummary
+        summary = AccountSummary(
+            name="Acc_Deduce",
+            checkin_status="SUCCESS",
+            coins_earned=60,
+            total_coins=1200,
+            tasks_coins=25
+        )
+        self.assertEqual(summary.initial_coins, 1140)
+        self.assertEqual(summary.checkin_coins, 35)
+
+    def test_step_summary_contains_detailed_tables_and_breakdown(self):
+        import tempfile
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="VIP_Buyer",
+            checkin_status="SUCCESS",
+            coins_earned=70,
+            streak_days=5,
+            total_coins=2070,
+            initial_coins=2000,
+            pc_status="SUCCESS",
+            pc_coins=30,
+            mobile_status="SUCCESS",
+            mobile_coins=20,
+            checkin_coins=50,
+            tasks_done=2,
+            tasks_coins=20,
+            tasks_skipped=1,
+            tasks_failed=0,
+            coupons_claimed=1,
+            task_details=[
+                {"task_id": "T1", "title": "Browse 1", "status": "COMPLETED", "coins": 10, "reason": "Переглянуто"},
+                {"task_id": "T2", "title": "Browse 2", "status": "COMPLETED", "coins": 10, "reason": "Переглянуто"},
+                {"task_id": "T3", "title": "Unsafe Cart", "status": "SKIPPED", "coins": 0, "reason": "Небезпечна дія"}
+            ],
+            coupon_details=[
+                {"id": "web_coupon_center_daily", "status": "SUCCESS", "reason": "Купон успішно зібрано"}
+            ]
+        ))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIsNotNone(md)
+                # Перевірка зведення нагород
+                self.assertIn("🪙 Чекін: +50 🪙", md)
+                self.assertIn("🛍️ Завдання: +20 🪙 (2 вик.)", md)
+                # Перевірка балансу початковий -> фінальний
+                self.assertIn("2,000 ➔ 2,070 🪙", md)
+                # Перевірка таблиці Dual-Channel
+                self.assertIn("Деталізація чекіну по каналах (Dual-Channel)", md)
+                self.assertIn("+30 🪙", md)
+                self.assertIn("+20 🪙", md)
+                # Перевірка таблиці завдань
+                self.assertIn("Деталізація інтерактивних завдань (MTOP)", md)
+                self.assertIn("Browse 1", md)
+                self.assertIn("Browse 2", md)
+                self.assertIn("Unsafe Cart", md)
+                self.assertIn("Небезпечна дія", md)
+                # Перевірка таблиці купонів
+                self.assertIn("Деталізація зібраних купонів", md)
+                self.assertIn("web_coupon_center_daily", md)
+                self.assertIn("Купон успішно зібрано", md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_telegram_notification_contains_detailed_breakdown(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_bot_token"
+        dispatcher.telegram_chat_id = "fake_chat_id"
+
+        dispatcher.add_summary(AccountSummary(
+            name="Super_Buyer",
+            checkin_status="SUCCESS",
+            coins_earned=55,
+            streak_days=10,
+            total_coins=1555,
+            initial_coins=1500,
+            pc_status="SUCCESS",
+            pc_coins=25,
+            mobile_status="SUCCESS",
+            mobile_coins=15,
+            tasks_done=1,
+            tasks_coins=15,
+            tasks_skipped=1,
+            tasks_failed=0,
+            coupons_claimed=1,
+            task_details=[
+                {"title": "Explore Deals", "status": "COMPLETED", "coins": 15, "reason": "Зараховано"},
+                {"title": "Add to Cart", "status": "SKIPPED", "coins": 0, "reason": "Пропущено безпекою"}
+            ]
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            res = dispatcher.send_telegram_notification()
+            self.assertTrue(res)
+            mock_post.assert_called_once()
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            # Перевірка початкового та фінального балансу
+            self.assertIn("1,500", call_text)
+            self.assertIn("1,555", call_text)
+            self.assertIn("+55", call_text)
+
+            # Перевірка розбивки каналів PC та App
+            self.assertIn("🖥️ PC: ✅ Зараховано (+25 🪙)", call_text)
+            self.assertIn("📱 App: ✅ Зараховано (+15 🪙)", call_text)
+
+            # Перевірка тасок та купонів
+            self.assertIn("🛍️ Таски: <b>1</b> вик. (+15 🪙), 1 пропущ.", call_text)
+            self.assertIn("Explore Deals", call_text)
+            self.assertIn("Add to Cart", call_text)
+            self.assertIn("🎟️ Купони: <b>1</b> зібрано", call_text)
+
+    def test_telegram_message_truncation_on_extreme_length(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "token"
+        dispatcher.telegram_chat_id = "chat"
+
+        # Додаємо велику кількість акаунтів та довгих тасок для перевірки ліміту 4096 символів
+        for i in range(25):
+            dispatcher.add_summary(AccountSummary(
+                name=f"Long_Account_Name_{i}_" + "X" * 40,
+                checkin_status="SUCCESS",
+                coins_earned=50,
+                streak_days=10,
+                total_coins=1000 + i,
+                tasks_done=3,
+                tasks_coins=30,
+                task_details=[
+                    {"title": f"Very Long Task Description Number {j} for Account {i} " + "Y" * 50, "status": "COMPLETED", "coins": 10, "reason": "Success"}
+                    for j in range(3)
+                ]
+            ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            res = dispatcher.send_telegram_notification()
+            self.assertTrue(res)
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertLessEqual(len(sent_text), 4050)
+            self.assertIn("...[текст скорочено через ліміт Telegram]...", sent_text)
+
+    def test_checkin_manager_tracks_per_channel_coins_and_balances(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_detailed_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 25, "streak": 4}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "SUCCESS", "coins": 15, "streak": 4}), \
+             patch.object(mgr, "_fetch_coin_balance") as mock_fetch:
+            def fake_fetch():
+                mgr.total_coins = 500
+            mock_fetch.side_effect = fake_fetch
+
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.pc_coins, 25)
+            self.assertEqual(mgr.mobile_coins, 15)
+            self.assertEqual(mgr.coins_earned, 40)
+            self.assertEqual(mgr.final_coins, 500)
+            self.assertEqual(mgr.initial_coins, 460)
+
+    def test_coins_farm_manager_records_itemized_tasks(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_tasks_123"})
+        mgr = CheckinManager(client)
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+
+        mock_tasks = [
+            {
+                "taskId": "task_1",
+                "taskTitle": "Browse Deals",
+                "taskType": "browse",
+                "status": "todo",
+                "staySeconds": 15,
+                "actionUrl": "https://aliexpress.com/deals"
+            },
+            {
+                "taskId": "task_2",
+                "taskTitle": "Buy product with credit card",
+                "taskType": "buy",
+                "status": "todo",
+                "actionUrl": "https://aliexpress.com/pay"
+            }
+        ]
+
+        with patch.object(coins, "fetch_active_tasks", return_value=mock_tasks), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(coins, "_complete_task", return_value=True), \
+             patch.object(coins, "_claim_task_reward", return_value=20):
+
+            done = coins.farm_browse_tasks(count=2)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins.tasks_completed, 1)
+            self.assertEqual(coins.tasks_skipped, 1)
+            self.assertEqual(coins.task_coins_earned, 20)
+            self.assertEqual(len(coins.task_records), 2)
+            self.assertEqual(coins.task_records[0]["status"], "SKIPPED")
+            self.assertIn("Небезпечна дія", coins.task_records[0]["reason"])
+            self.assertEqual(coins.task_records[1]["status"], "COMPLETED")
+            self.assertEqual(coins.task_records[1]["coins"], 20)
+
+    def test_coupon_collector_records_coupon_attempts(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_coupons_123"})
+        coupon = CouponCollector(client)
+
+        mock_page = MagicMock(status_code=200, text='activityId="campaign_summer_2026"')
+        mock_claim = MagicMock(status_code=200)
+        mock_claim.headers = {"content-type": "application/json"}
+        mock_claim.json.return_value = {"success": True, "ret": ["SUCCESS::ok"]}
+
+        with patch.object(client, "get", return_value=mock_page), \
+             patch.object(client, "post", return_value=mock_claim):
+
+            count = coupon.collect_available_coupons()
+            self.assertGreaterEqual(count, 1)
+            self.assertTrue(len(coupon.coupon_records) > 0)
+            self.assertEqual(coupon.coupon_records[0]["status"], "SUCCESS")
+
+    def test_coupon_collector_records_already_done_and_skipped(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_coupons_456"})
+        coupon = CouponCollector(client)
+
+        # 1. Тест ALREADY_DONE
+        mock_page = MagicMock(status_code=200, text='activityId="campaign_promo_2026"')
+        mock_claim = MagicMock(status_code=200)
+        mock_claim.headers = {"content-type": "application/json"}
+        mock_claim.json.return_value = {"success": False, "msg": "coupon already claimed"}
+
+        with patch.object(client, "get", return_value=mock_page), \
+             patch.object(client, "post", return_value=mock_claim):
+            count = coupon.collect_available_coupons()
+            self.assertEqual(count, 0)
+            self.assertEqual(len(coupon.coupon_records), 1)
+            self.assertEqual(coupon.coupon_records[0]["status"], "ALREADY_DONE")
+
+        # 2. Тест SKIPPED при недоступності Coupon Center
+        mock_page_fail = MagicMock(status_code=503)
+        with patch.object(client, "get", return_value=mock_page_fail):
+            count2 = coupon.collect_available_coupons()
+            self.assertEqual(count2, 0)
+            self.assertEqual(len(coupon.coupon_records), 1)
+            self.assertEqual(coupon.coupon_records[0]["status"], "SKIPPED")
+            self.assertIn("503", coupon.coupon_records[0]["reason"])
+
+    def test_telegram_safe_html_truncation_preserves_closed_tags(self):
+        from src.notifications import _safe_truncate_html
+        import re
+
+        raw = "<b>Header</b>\n" + "<i>Line with <code>code snippet</i> and <b>bold text</b>\n" * 100
+        truncated = _safe_truncate_html(raw, max_length=500)
+        self.assertLessEqual(len(truncated), 550)
+        self.assertIn("...[текст скорочено через ліміт Telegram]...", truncated)
+
+        # Перевірка строгого закриття всіх тегів
+        for tag in ["b", "i", "code"]:
+            open_count = len(re.findall(rf"<{tag}(?:\s+[^>]*)?>", truncated))
+            close_count = len(re.findall(rf"</{tag}>", truncated))
+            self.assertEqual(open_count, close_count, f"Тег <{tag}> не збалансовано: відкрито {open_count}, закрито {close_count}!")
+
+    def test_has_captcha_and_has_expired_detected_across_channels(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Acc_Mobile_Captcha",
+            checkin_status="SUCCESS",
+            pc_status="SUCCESS",
+            mobile_status="CAPTCHA_REQUIRED",
+            session_valid=True
+        ))
+
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIn("Виявлено захист від роботів (Alibaba WAF Captcha)", md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_checkin_early_exit_preserves_pc_and_mobile_status(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_exit_123"})
+        mgr = CheckinManager(client)
+
+        # Випадок 1: PC повертає CAPTCHA_REQUIRED
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "CAPTCHA_REQUIRED", "coins": 0, "streak": 0}):
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+            self.assertEqual(mgr.pc_status, "CAPTCHA_REQUIRED")
+            self.assertEqual(mgr.mobile_status, "SKIPPED")
+
+        # Випадок 2: PC FAILED, а Mobile повертає CAPTCHA_REQUIRED
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "FAILED", "coins": 0, "streak": 0}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "CAPTCHA_REQUIRED", "coins": 0, "streak": 0}):
+            ok = mgr.run_checkin()
+            self.assertFalse(ok)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+            self.assertEqual(mgr.pc_status, "FAILED")
+            self.assertEqual(mgr.mobile_status, "CAPTCHA_REQUIRED")
+
+    def test_checkin_manager_preserves_coins_on_already_done(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_already_123"})
+        mgr = CheckinManager(client)
+
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "ALREADY_DONE", "coins": 20, "streak": 5}), \
+             patch.object(mgr, "_checkin_mobile_channel", return_value={"status": "ALREADY_DONE", "coins": 20, "streak": 5}), \
+             patch.object(mgr, "_fetch_coin_balance"):
+            ok = mgr.run_checkin()
+            self.assertTrue(ok)
+            self.assertEqual(mgr.status, "ALREADY_DONE")
+            self.assertEqual(mgr.pc_coins, 20)
+            self.assertEqual(mgr.mobile_coins, 20)
+            self.assertEqual(mgr.coins_earned, 20)
+
+    def test_step_summary_includes_error_table_when_account_has_error(self):
+        import tempfile
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Broken_Account",
+            checkin_status="FAILED",
+            session_valid=False,
+            error_message="Invalid credentials token signature"
+        ))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIn("Помилки та попередження", md)
+                self.assertIn("Broken_Account", md)
+                self.assertIn("Invalid credentials token signature", md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_safe_truncate_html_with_small_max_length_strictly_bounded(self):
+        from src.notifications import _safe_truncate_html
+        raw = "A" * 300
+        truncated = _safe_truncate_html(raw, max_length=100)
+        self.assertLessEqual(len(truncated), 100)
+
+        # Перевірка з HTML розміткою
+        raw_html = "<b>Header</b>\n<i>" + "word " * 50 + "</i>"
+        truncated_html = _safe_truncate_html(raw_html, max_length=120)
+        self.assertLessEqual(len(truncated_html), 120)
+
+    def test_safe_truncate_html_avoids_malformed_unclosed_tags_and_void_tags(self):
+        from src.notifications import _safe_truncate_html
+        # Обрізка на незакритій кутовій дужці
+        raw = "<b>Header</b>\n<i>Line with <code"
+        truncated = _safe_truncate_html(raw, max_length=25)
+        self.assertNotIn("<code</i>", truncated)
+        self.assertNotIn("<code", truncated)
+        self.assertIn("</i>", truncated)
+
+        # Перевірка void-тегів (не повинні продукувати </br>)
+        raw_br = "<b>Line 1</b><br/><b>Line 2</b><br/>" + "long line " * 20
+        truncated_br = _safe_truncate_html(raw_br, max_length=90)
+        self.assertNotIn("</br>", truncated_br)
+
+    def test_coins_and_coupons_skip_when_checkin_captcha_required(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_captcha_123"})
+        mgr = CheckinManager(client)
+        mgr.status = "CAPTCHA_REQUIRED"
+
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+        coupons = CouponCollector(client, checkin_mgr=mgr)
+
+        with patch.object(client, "get") as mock_get, \
+             patch.object(client, "post") as mock_post:
+            done_coins = coins.farm_browse_tasks(count=4)
+            self.assertEqual(done_coins, 0)
+            self.assertEqual(coins.status, "SKIPPED")
+            self.assertEqual(len(coins.task_records), 1)
+            self.assertEqual(coins.task_records[0]["status"], "SKIPPED")
+            self.assertIn("капчею WAF", coins.task_records[0]["reason"])
+
+            claimed_coupons = coupons.collect_available_coupons()
+            self.assertEqual(claimed_coupons, 0)
+            self.assertEqual(len(coupons.coupon_records), 1)
+            self.assertEqual(coupons.coupon_records[0]["status"], "SKIPPED")
+            self.assertIn("капчею WAF", coupons.coupon_records[0]["reason"])
+
+            # Жодних запитів до серверів не надсилалося
+            self.assertEqual(mock_get.call_count, 0)
+            self.assertEqual(mock_post.call_count, 0)
+
+    def test_coins_and_coupons_skip_when_checkin_session_expired(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_expired_123"})
+        mgr = CheckinManager(client)
+        mgr.status = "SESSION_EXPIRED"
+        mgr.session_valid = False
+
+        coins = CoinsFarmManager(client, checkin_mgr=mgr)
+        coupons = CouponCollector(client, checkin_mgr=mgr)
+
+        with patch.object(client, "get") as mock_get, \
+             patch.object(client, "post") as mock_post:
+            done_coins = coins.farm_browse_tasks(count=4)
+            self.assertEqual(done_coins, 0)
+            self.assertEqual(coins.status, "SKIPPED")
+            self.assertEqual(coins.task_records[0]["status"], "SKIPPED")
+            self.assertIn("недійсну сесію", coins.task_records[0]["reason"])
+
+            claimed_coupons = coupons.collect_available_coupons()
+            self.assertEqual(claimed_coupons, 0)
+            self.assertEqual(coupons.coupon_records[0]["status"], "SKIPPED")
+            self.assertIn("недійсну сесію", coupons.coupon_records[0]["reason"])
+
+            self.assertEqual(mock_get.call_count, 0)
+            self.assertEqual(mock_post.call_count, 0)
+
+    def test_coupon_collector_does_not_kill_endpoint_on_waf_captcha_response(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_test_waf"})
+        coupons = CouponCollector(client)
+
+        mock_page = MagicMock(status_code=200, text='activityId="test_campaign_waf"')
+        mock_claim = MagicMock(status_code=200, text="RGV587_RUN_SCRIPT")
+        mock_claim.headers = {"content-type": "text/html"}
+
+        with patch.object(client, "get", return_value=mock_page), \
+             patch.object(client, "post", return_value=mock_claim):
+            count = coupons.collect_available_coupons()
+            self.assertEqual(count, 0)
+            self.assertEqual(len(coupons.coupon_records), 1)
+            self.assertEqual(coupons.coupon_records[0]["status"], "CAPTCHA_REQUIRED")
+            # Ендпоінт НЕ повинен потрапити до неактивних через капчу
+            self.assertNotIn("https://campaign.aliexpress.com/coupon/claim", CouponCollector._dead_endpoints)
+
+    def test_telegram_reporting_when_coupons_already_done_or_skipped(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "token"
+        dispatcher.telegram_chat_id = "chat"
+
+        dispatcher.add_summary(AccountSummary(
+            name="Coupon_User",
+            checkin_status="SUCCESS",
+            coins_earned=20,
+            streak_days=3,
+            coupons_claimed=0,
+            coupon_details=[
+                {"id": "promo_1", "status": "ALREADY_DONE", "reason": "Вже зібрано"}
+            ]
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("🎟️ Купони: ℹ️ Всі доступні купони вже отримано", sent_text)
+
+    def test_summary_reports_no_accounts_status_when_empty(self):
+        from src.notifications import NotificationDispatcher
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "token"
+        dispatcher.telegram_chat_id = "chat"
+
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                md = dispatcher.generate_step_summary()
+                self.assertIn("⚪ Немає акаунтів", md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("Немає акаунтів", sent_text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

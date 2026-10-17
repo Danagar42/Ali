@@ -579,6 +579,12 @@ class CheckinManager:
         self.session_valid = True
         self.pc_status = "FAILED"
         self.mobile_status = "FAILED"
+        self.pc_coins = 0
+        self.mobile_coins = 0
+        self.pc_streak = 0
+        self.mobile_streak = 0
+        self.initial_coins: Optional[int] = None
+        self.final_coins: Optional[int] = None
 
     def _prepare_mtop_params(
         self,
@@ -1594,15 +1600,26 @@ class CheckinManager:
         """
         logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну (Dual-Channel: PC + Mobile)...")
         self.coins_earned = 0
+        self.status = "FAILED"
+        self.pc_status = "FAILED"
+        self.mobile_status = "FAILED"
+        self.pc_coins = 0
+        self.mobile_coins = 0
+        self.pc_streak = 0
+        self.mobile_streak = 0
 
         # 1. Запуск PC Desktop чекіну
         pc_res = self._run_pc_checkin()
 
         # Якщо на PC спрацювала капча або сесія прострочена — перериваємо негайно
         if pc_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
+            self.pc_status = "CAPTCHA_REQUIRED"
+            self.mobile_status = "SKIPPED"
             self.status = "CAPTCHA_REQUIRED"
             return False
         if pc_res.get("status") == "SESSION_EXPIRED" or not self.session_valid:
+            self.pc_status = "SESSION_EXPIRED"
+            self.mobile_status = "SKIPPED"
             self.status = "SESSION_EXPIRED"
             return False
 
@@ -1618,9 +1635,14 @@ class CheckinManager:
 
         # Якщо на мобільному спрацювала капча
         if mobile_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
+            self.pc_status = pc_status
+            self.mobile_status = "CAPTCHA_REQUIRED"
+            self.pc_coins = pc_coins if pc_status in ("SUCCESS", "ALREADY_DONE") else 0
+            self.mobile_coins = 0
+            self.pc_streak = pc_streak
+            self.mobile_streak = 0
             if pc_status in ("SUCCESS", "ALREADY_DONE"):
                 logger.warning(f"[{self.account_name}] 🧩 Канал Mobile вимагає капчі, але чекін на PC вже успішно зараховано ({pc_status})!")
-                mobile_status = "CAPTCHA_REQUIRED"
                 self.status = pc_status
             else:
                 self.status = "CAPTCHA_REQUIRED"
@@ -1628,10 +1650,15 @@ class CheckinManager:
 
         # Якщо на мобільному повернуто SESSION_EXPIRED
         if mobile_res.get("status") == "SESSION_EXPIRED" or not self.session_valid:
+            self.pc_status = pc_status
+            self.mobile_status = "SESSION_EXPIRED"
+            self.pc_coins = pc_coins if pc_status in ("SUCCESS", "ALREADY_DONE") else 0
+            self.mobile_coins = 0
+            self.pc_streak = pc_streak
+            self.mobile_streak = 0
             if pc_status in ("SUCCESS", "ALREADY_DONE"):
                 logger.warning(f"[{self.account_name}] ⚠️ Канал Mobile повернув недійсну сесію, але чекін на PC вже успішно зараховано ({pc_status})!")
                 self.session_valid = True
-                mobile_status = "SESSION_EXPIRED"
                 self.status = pc_status
             else:
                 self.status = "SESSION_EXPIRED"
@@ -1666,6 +1693,10 @@ class CheckinManager:
         # Збереження деталізованої інформації по каналах
         self.pc_status = pc_status
         self.mobile_status = mobile_status
+        self.pc_coins = pc_coins if pc_status in ("SUCCESS", "ALREADY_DONE") else 0
+        self.mobile_coins = mobile_coins if mobile_status in ("SUCCESS", "ALREADY_DONE") else 0
+        self.pc_streak = pc_streak
+        self.mobile_streak = mobile_streak
 
         logger.info(
             f"[{self.account_name}] 📊 Підсумок Dual-Channel чекіну: Статус={self.status}, "
@@ -1675,6 +1706,9 @@ class CheckinManager:
 
         # 6. Отримання точного балансу монет через mtop.aliexpress.coin.execute
         self._fetch_coin_balance()
+        if self.total_coins is not None:
+            self.final_coins = self.total_coins
+            self.initial_coins = max(0, self.total_coins - self.coins_earned)
 
         return self.status in ("SUCCESS", "ALREADY_DONE")
 

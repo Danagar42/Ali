@@ -96,18 +96,43 @@ def main():
             coins_done = coins_mgr.farm_browse_tasks(count=4)
 
             # 3.3 Збір купонів
-            coupon_mgr = CouponCollector(client)
+            coupon_mgr = CouponCollector(client, checkin_mgr=checkin_mgr)
             coupons_done = coupon_mgr.collect_available_coupons()
 
             # Облік зароблених монет (чекін + безпечні завдання)
             task_coins = getattr(coins_mgr, "task_coins_earned", 0)
             if not isinstance(task_coins, (int, float)):
                 task_coins = 0
-            total_earned_today = (checkin_mgr.coins_earned or 0) + int(task_coins)
+            earned_from_checkin = checkin_mgr.coins_earned if isinstance(checkin_mgr.coins_earned, (int, float)) else 0
+            total_earned_today = earned_from_checkin + int(task_coins)
 
-            account_total_coins = checkin_mgr.total_coins
+            checkin_total = checkin_mgr.total_coins if isinstance(checkin_mgr.total_coins, (int, float)) else None
+            account_total_coins = checkin_total
             if account_total_coins is not None and task_coins > 0:
                 account_total_coins += int(task_coins)
+
+            # Розрахунок початкового балансу до чекіну та завдань
+            init_c = getattr(checkin_mgr, "initial_coins", None)
+            initial_balance = int(init_c) if isinstance(init_c, (int, float)) else None
+            if initial_balance is None and account_total_coins is not None:
+                initial_balance = max(0, account_total_coins - total_earned_today)
+
+            pc_coins_earned = int(getattr(checkin_mgr, "pc_coins", 0)) if isinstance(getattr(checkin_mgr, "pc_coins", 0), (int, float)) else 0
+            mobile_coins_earned = int(getattr(checkin_mgr, "mobile_coins", 0)) if isinstance(getattr(checkin_mgr, "mobile_coins", 0), (int, float)) else 0
+            pc_status = getattr(checkin_mgr, "pc_status", None)
+            if not isinstance(pc_status, str):
+                pc_status = None
+            mobile_status = getattr(checkin_mgr, "mobile_status", None)
+            if not isinstance(mobile_status, str):
+                mobile_status = None
+            tasks_skipped = int(getattr(coins_mgr, "tasks_skipped", 0)) if isinstance(getattr(coins_mgr, "tasks_skipped", 0), (int, float)) else 0
+            tasks_failed = int(getattr(coins_mgr, "tasks_failed", 0)) if isinstance(getattr(coins_mgr, "tasks_failed", 0), (int, float)) else 0
+            task_records = getattr(coins_mgr, "task_records", [])
+            if not isinstance(task_records, list):
+                task_records = []
+            coupon_records = getattr(coupon_mgr, "coupon_records", [])
+            if not isinstance(coupon_records, list):
+                coupon_records = []
 
             # Фіксація звіту по акаунту для сповіщень
             summary = AccountSummary(
@@ -118,7 +143,20 @@ def main():
                 total_coins=account_total_coins,
                 tasks_done=coins_done,
                 coupons_claimed=coupons_done,
-                session_valid=checkin_mgr.session_valid
+                session_valid=checkin_mgr.session_valid,
+                initial_coins=initial_balance,
+                pc_status=pc_status,
+                pc_coins=pc_coins_earned,
+                pc_streak=int(getattr(checkin_mgr, "pc_streak", 0)) if isinstance(getattr(checkin_mgr, "pc_streak", 0), (int, float)) else 0,
+                mobile_status=mobile_status,
+                mobile_coins=mobile_coins_earned,
+                mobile_streak=int(getattr(checkin_mgr, "mobile_streak", 0)) if isinstance(getattr(checkin_mgr, "mobile_streak", 0), (int, float)) else 0,
+                checkin_coins=earned_from_checkin,
+                tasks_coins=int(task_coins),
+                tasks_skipped=tasks_skipped,
+                tasks_failed=tasks_failed,
+                task_details=task_records,
+                coupon_details=coupon_records
             )
             dispatcher.add_summary(summary)
 
@@ -148,7 +186,49 @@ def main():
             logger.info(f"⏸️ Пауза перед наступним акаунтом: {account_delay:.1f} сек...\n")
             time.sleep(account_delay)
 
-    logger.info(f"\n📊 Підсумок обробки: успішно {success_count}, з помилками {failed_count} (всього {len(accounts)})")
+    logger.info(f"\n=======================================================")
+    logger.info(f"📊 ПІДСУМКОВИЙ ЗВІТ ОБРОБКИ ({len(accounts)} акаунтів)")
+    logger.info(f"=======================================================")
+    for s in dispatcher.summaries:
+        init_str = f"{int(s.initial_coins):,}" if isinstance(s.initial_coins, (int, float)) else "Н/Д"
+        total_str = f"{int(s.total_coins):,}" if isinstance(s.total_coins, (int, float)) else "Н/Д"
+        earned_str = f"{int(s.coins_earned):,}" if isinstance(s.coins_earned, (int, float)) else ("0" if s.coins_earned is None else str(s.coins_earned))
+        streak_v = int(s.streak_days) if isinstance(s.streak_days, (int, float)) else 0
+        streak_str = f"{streak_v} дн." if streak_v > 0 else "-"
+        pc_c = int(s.pc_coins) if isinstance(s.pc_coins, (int, float)) else 0
+        mob_c = int(s.mobile_coins) if isinstance(s.mobile_coins, (int, float)) else 0
+        tasks_c = int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0
+        pc_note = " (раніше)" if (s.pc_status or s.checkin_status) == "ALREADY_DONE" and pc_c > 0 else ""
+        mob_note = " (раніше)" if (s.mobile_status or s.checkin_status) == "ALREADY_DONE" and mob_c > 0 else ""
+        logger.info(f"👤 [{s.name}]")
+        logger.info(f"   ├ Сесія: {'🟢 Валідна' if s.session_valid else '🔴 Недійсна'}")
+        if s.error_message:
+            logger.info(f"   ├ ⚠️ Помилка: {s.error_message}")
+        logger.info(f"   ├ Чекін: {s.checkin_status} (🔥 стрік {streak_str})")
+        logger.info(f"   ├ Канал PC: {s.pc_status or '-'} (+{pc_c} 🪙{pc_note})")
+        logger.info(f"   ├ Канал Mobile: {s.mobile_status or '-'} (+{mob_c} 🪙{mob_note})")
+        logger.info(f"   ├ Інтерактивні таски: {s.tasks_done} вик. (+{tasks_c} 🪙), {s.tasks_skipped} пропущ., {s.tasks_failed} збій")
+        if s.task_details:
+            for td in s.task_details[:6]:
+                st_icon = "✅" if td.get("status") == "COMPLETED" else ("⏭️" if td.get("status") == "SKIPPED" else "❌")
+                coins_s = f" (+{td.get('coins')} 🪙)" if td.get("coins", 0) > 0 else ""
+                reason_s = f" ({td.get('reason')})" if td.get("reason") else ""
+                logger.info(f"   │   {st_icon} {td.get('title')}{coins_s}{reason_s}")
+            if len(s.task_details) > 6:
+                logger.info(f"   │   ... ще {len(s.task_details) - 6} завдань")
+        logger.info(f"   ├ Зібрано купонів: {s.coupons_claimed}")
+        if s.coupon_details:
+            for cd in s.coupon_details[:3]:
+                c_icon = "✅" if cd.get("status") == "SUCCESS" else ("ℹ️" if cd.get("status") == "ALREADY_DONE" else "⚠️")
+                logger.info(f"   │   {c_icon} {cd.get('id')}: {cd.get('reason')}")
+        logger.info(f"   └ 💰 Баланс: {init_str} ➔ {total_str} 🪙 (Сьогодні: +{earned_str} 🪙)")
+    logger.info(f"-------------------------------------------------------")
+    total_earned_all = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in dispatcher.summaries)
+    total_checkin_all = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in dispatcher.summaries)
+    total_tasks_all = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in dispatcher.summaries)
+    total_coupons_all = sum(int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0 for s in dispatcher.summaries)
+    logger.info(f"Успішно: {success_count} | З помилками: {failed_count} | Всього монет: +{total_earned_all} 🪙 (Чекін: +{total_checkin_all}, Таски: +{total_tasks_all}) | Купонів: {total_coupons_all}")
+    logger.info(f"=======================================================\n")
 
     # 4. Відправка сповіщень у GitHub Actions Step Summary та Telegram
     dispatcher.dispatch()

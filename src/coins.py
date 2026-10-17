@@ -148,6 +148,10 @@ class CoinsFarmManager:
         self.status = "INIT"
         self.error_message: Optional[str] = None
         self.working_platform: str = TASK_PLATFORM
+        self.tasks_completed: int = 0
+        self.tasks_skipped: int = 0
+        self.tasks_failed: int = 0
+        self.task_records: List[Dict[str, Any]] = []
 
     @classmethod
     def reset_dead_urls(cls):
@@ -353,8 +357,13 @@ class CoinsFarmManager:
                     if resp is None or resp.status_code in (404, 405, 410, 500, 502, 503, 504):
                         self._dead_urls.add(query_url)
                     continue
-                content_type = resp.headers.get("content-type", "").lower()
-                if "json" not in content_type:
+                raw_ct = ""
+                if hasattr(resp, "headers") and hasattr(resp.headers, "get"):
+                    ct_val = resp.headers.get("content-type", "")
+                    if isinstance(ct_val, str):
+                        raw_ct = ct_val.lower()
+
+                if raw_ct and "json" not in raw_ct:
                     self._dead_urls.add(query_url)
                     continue
                 try:
@@ -422,27 +431,109 @@ class CoinsFarmManager:
         """
         self.completed_tasks = 0
         self.task_coins_earned = 0
+        self.tasks_completed = 0
+        self.tasks_skipped = 0
+        self.tasks_failed = 0
+        self.task_records = []
 
         # 1. Якщо доступний MTOP шлюз, виконуємо реальні безпечні завдання
         if self.checkin_mgr is not None:
+            if getattr(self.checkin_mgr, "status", None) == "CAPTCHA_REQUIRED" or getattr(self.checkin_mgr, "mobile_status", None) == "CAPTCHA_REQUIRED":
+                logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF капчу, пропускаємо виконання завдань.")
+                self.status = "SKIPPED"
+                self.tasks_skipped += 1
+                self.task_records.append({
+                    "task_id": "WAF_CAPTCHA",
+                    "title": "Завдання платформи",
+                    "status": "SKIPPED",
+                    "coins": 0,
+                    "reason": "Пропущено через блокування капчею WAF"
+                })
+                return 0
+            if getattr(self.checkin_mgr, "session_valid", True) is False or getattr(self.checkin_mgr, "status", None) == "SESSION_EXPIRED":
+                logger.warning(f"[{self.account_name}] ❌ Сесія недійсна, пропускаємо виконання завдань.")
+                self.status = "SKIPPED"
+                self.tasks_skipped += 1
+                self.task_records.append({
+                    "task_id": "SESSION_EXPIRED",
+                    "title": "Завдання платформи",
+                    "status": "SKIPPED",
+                    "coins": 0,
+                    "reason": "Пропущено через недійсну сесію акаунта"
+                })
+                return 0
+
             logger.info(f"[{self.account_name}] 🛍️ Початок виконання завдань (безпечний перегляд ~15 сек, ліміт: {count})...")
             active_tasks = self.fetch_active_tasks()
             if self.status == "FAILED":
                 logger.error(f"[{self.account_name}] ❌ Етап виконання завдань позначено як FAILED через помилку MTOP API.")
+                self.tasks_failed += 1
+                self.task_records.append({
+                    "task_id": "DELIVERY_QUERY",
+                    "title": "Опитування платформи завдань",
+                    "status": "FAILED",
+                    "coins": 0,
+                    "reason": self.error_message or "Помилка MTOP API"
+                })
                 return 0
             if self.status in ("SKIPPED", "NO_TASKS"):
                 logger.info(f"[{self.account_name}] ℹ️ Виконання завдань пропущено ({self.status}).")
+                self.tasks_skipped += 1
+                self.task_records.append({
+                    "task_id": "DELIVERY_QUERY",
+                    "title": "Опитування платформи завдань",
+                    "status": "SKIPPED",
+                    "coins": 0,
+                    "reason": self.error_message or "Немає активних груп (E2-14-3)"
+                })
                 return 0
 
-            safe_tasks = [t for t in active_tasks if self.is_safe_task(t)]
+            safe_tasks = []
+            for t in active_tasks:
+                if self.is_safe_task(t):
+                    safe_tasks.append(t)
+                else:
+                    self.tasks_skipped += 1
+                    t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
+                    t_status_str = str(t.get("status", "")).lower()
+                    text_repr = " ".join([
+                        str(t.get("taskTitle", "")),
+                        str(t.get("taskType", "")),
+                        str(t.get("actionUrl", "")),
+                        str(t.get("actionType", ""))
+                    ]).lower()
+                    if t_status_str in ("completed", "finished", "done"):
+                        reason = "Вже виконано раніше"
+                    elif any(bw in text_repr for bw in UNSAFE_KEYWORDS):
+                        reason = "Небезпечна дія (покупка/підписка/кошик)"
+                    else:
+                        reason = "Фільтр безпеки: непідтримуваний тип"
+                    self.task_records.append({
+                        "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
+                        "title": t_title,
+                        "status": "SKIPPED",
+                        "coins": 0,
+                        "reason": reason
+                    })
 
             if safe_tasks:
                 safe_tasks.sort(key=lambda t: 0 if (t.get("status") in ("waitforreceive", "wait_for_receive") or t.get("unIssueRecord")) else 1)
                 tasks_to_run = safe_tasks[:count]
+                for t in safe_tasks[count:]:
+                    self.tasks_skipped += 1
+                    t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
+                    self.task_records.append({
+                        "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
+                        "title": t_title,
+                        "status": "SKIPPED",
+                        "coins": 0,
+                        "reason": "Перевищено ліміт завдань на сесію"
+                    })
 
                 for idx, task in enumerate(tasks_to_run, 1):
                     title = task.get("taskTitle", f"Завдання #{idx}")
                     status = task.get("status", "")
+                    task_id = str(task.get("taskId") or task.get("taskInstanceId") or f"TASK_{idx}")
                     is_claim_only = status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord"))
 
                     if is_claim_only:
@@ -450,7 +541,24 @@ class CoinsFarmManager:
                         coins = self._claim_task_reward(task)
                         if coins >= 0:
                             self.completed_tasks += 1
+                            self.tasks_completed += 1
                             self.task_coins_earned += coins
+                            self.task_records.append({
+                                "task_id": task_id,
+                                "title": title,
+                                "status": "COMPLETED",
+                                "coins": coins,
+                                "reason": "Забрано невиплачену нагороду"
+                            })
+                        else:
+                            self.tasks_failed += 1
+                            self.task_records.append({
+                                "task_id": task_id,
+                                "title": title,
+                                "status": "FAILED",
+                                "coins": 0,
+                                "reason": "Не вдалося отримати нагороду"
+                            })
                         continue
 
                     # Виконання завдання з очікуванням 15-18 секунд
@@ -472,16 +580,44 @@ class CoinsFarmManager:
                     # Забирання нагороди (клейм монет)
                     coins = self._claim_task_reward(task)
                     if complete_ok or coins >= 0:
+                        earned = coins if coins > 0 else 0
                         self.completed_tasks += 1
-                        if coins > 0:
-                            self.task_coins_earned += coins
-                        logger.info(f"[{self.account_name}] ✅ Завдання '{title}' успішно зараховано! (+{coins if coins > 0 else 0} 🪙)")
+                        self.tasks_completed += 1
+                        if earned > 0:
+                            self.task_coins_earned += earned
+                        status_reason = "Успішно переглянуто та зараховано" if coins >= 0 else "Переглянуто, але нагороду не підтверджено"
+                        self.task_records.append({
+                            "task_id": task_id,
+                            "title": title,
+                            "status": "COMPLETED",
+                            "coins": earned,
+                            "reason": status_reason
+                        })
+                        logger.info(f"[{self.account_name}] ✅ Завдання '{title}' успішно зараховано! (+{earned} 🪙)")
+                    else:
+                        self.tasks_failed += 1
+                        self.task_records.append({
+                            "task_id": task_id,
+                            "title": title,
+                            "status": "FAILED",
+                            "coins": 0,
+                            "reason": "Сервер не підтвердив завершення перегляду"
+                        })
 
                 self.status = "SUCCESS"
                 return self.completed_tasks
             else:
                 logger.info(f"[{self.account_name}] ℹ️ Немає доступних безпечних завдань для виконання.")
                 self.status = "SUCCESS"
+                if not active_tasks:
+                    self.tasks_skipped += 1
+                    self.task_records.append({
+                        "task_id": "EMPTY",
+                        "title": "Завдання платформи",
+                        "status": "SKIPPED",
+                        "coins": 0,
+                        "reason": "Список завдань на сьогодні порожній"
+                    })
                 return 0
 
         # 2. Якщо checkin_mgr відсутній (legacy fallback для ізольованих тестів)
@@ -520,8 +656,27 @@ class CoinsFarmManager:
             )
             if reported:
                 completed_or_acknowledged += 1
+                self.tasks_completed += 1
+                self.task_records.append({
+                    "task_id": current_task_id,
+                    "title": f"Перегляд: {url}",
+                    "status": "COMPLETED",
+                    "coins": 0,
+                    "reason": "Legacy симуляція зарахована"
+                })
+            else:
+                self.tasks_failed += 1
+                self.task_records.append({
+                    "task_id": current_task_id,
+                    "title": f"Перегляд: {url}",
+                    "status": "FAILED",
+                    "coins": 0,
+                    "reason": "Legacy ендпоінт відхилив"
+                })
 
         self.completed_tasks = completed_or_acknowledged
+        if completed_or_acknowledged > 0:
+            self.status = "SUCCESS"
         return completed_or_acknowledged
 
     def _complete_task(self, task: Dict[str, Any]) -> bool:
@@ -652,8 +807,13 @@ class CoinsFarmManager:
                         self._dead_urls.add(url)
                     continue
 
-                content_type = resp.headers.get("content-type", "").lower()
-                if "json" not in content_type:
+                raw_ct = ""
+                if hasattr(resp, "headers") and hasattr(resp.headers, "get"):
+                    ct_val = resp.headers.get("content-type", "")
+                    if isinstance(ct_val, str):
+                        raw_ct = ct_val.lower()
+
+                if raw_ct and "json" not in raw_ct:
                     self._dead_urls.add(url)
                     continue
 
