@@ -3191,6 +3191,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             "taskId": "1001",
             "taskTitle": "Browse items for 15s to get coins",
             "taskType": 0,
+            "actionUrl": "https://aliexpress.com/category/1000.html",
             "status": "todo",
             "staySeconds": 15
         }
@@ -3201,6 +3202,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             "taskId": "1002",
             "taskTitle": "Daily discovery",
             "taskType": "browse",
+            "actionUrl": "https://aliexpress.com/category/2000.html",
             "status": "todo"
         }
         self.assertTrue(mgr.is_safe_task(safe_browse_2))
@@ -3227,6 +3229,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             "taskId": "1005",
             "taskTitle": "Search top finds",
             "actionType": "search",
+            "actionUrl": "https://aliexpress.com/search",
             "status": "todo"
         }
         self.assertTrue(mgr.is_safe_task(safe_search))
@@ -3348,7 +3351,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             "status": "todo",
             "staySeconds": 15,
             "actionUrl": "https://aliexpress.com/item/123.html",
-            "unIssueRecord": None
+            "unIssueRecord": None,
+            "issueHandle": 1
         }
 
         with patch.object(coins_mgr, "fetch_active_tasks", return_value=[safe_task]), \
@@ -3744,7 +3748,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
                             {
                                 "newTaskStatus": "todo",
                                 "staySeconds": 15,
-                                "actionUrl": "https://www.aliexpress.com/item/10001.html"
+                                "actionUrl": "https://www.aliexpress.com/item/10001.html",
+                                "issueHandle": 1
                             }
                         ]
                     }
@@ -3814,7 +3819,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
                                 {
                                     "taskInstanceId": "task_wire_1",
                                     "taskTitle": "Browse 15s via wireless",
-                                    "materials": [{"newTaskStatus": "todo", "staySeconds": 15, "actionUrl": "https://aliexpress.com/item/1.html"}]
+                                    "materials": [{"newTaskStatus": "todo", "staySeconds": 15, "actionUrl": "https://aliexpress.com/item/1.html", "issueHandle": 1}]
                                 }
                             ]
                         }
@@ -4091,7 +4096,8 @@ class TestDetailedFarmerReporting(unittest.TestCase):
                 "taskType": "browse",
                 "status": "todo",
                 "staySeconds": 15,
-                "actionUrl": "https://aliexpress.com/deals"
+                "actionUrl": "https://aliexpress.com/deals",
+                "issueHandle": 1
             },
             {
                 "taskId": "task_2",
@@ -4808,13 +4814,14 @@ class TestDetailedFarmerReporting(unittest.TestCase):
 
         game_task = {
             "taskInstanceId": "inst_game_fail",
-            "taskTitle": "GoGo Match",
-            "taskType": 1,
+            "taskTitle": "Browse items for 15s",
+            "taskType": 0,
             "status": "todo",
             "timesLimit": 1,
             "timesJoined": 0,
             "staySeconds": 1,
-            "actionUrl": "https://aliexpress.com/game"
+            "actionUrl": "https://aliexpress.com/game",
+            "issueHandle": 1
         }
         illegal_res = {
             "api": "mtop.aliexpress.interactive.task.process.complete",
@@ -5016,6 +5023,241 @@ class TestDetailedFarmerReporting(unittest.TestCase):
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+
+class TestCoinsFarmManagerRefinements(unittest.TestCase):
+    def setUp(self):
+        CoinsFarmManager.reset_dead_urls()
+
+    def tearDown(self):
+        CoinsFarmManager.reset_dead_urls()
+
+    def test_server_instance_status_and_joined_from_result_block(self):
+        """Перевіряє коректне зчитування instanceStatus, timesJoined та timesLimit з data.result після _complete_task."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        task = {
+            "taskInstanceId": "inst_multi_res",
+            "taskTitle": "Browse items for 15s",
+            "taskType": 0,
+            "status": "todo",
+            "timesLimit": 2,
+            "timesJoined": 0,
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/browse"
+        }
+        # Сервер повертає завершення (instanceStatus=2, timesJoined=2, timesLimit=2) усередині data.result
+        complete_res = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "result": {
+                    "completeSuccess": True,
+                    "instanceStatus": 2,
+                    "timesJoined": 2,
+                    "timesLimit": 2,
+                    "interestIssueResultMap": {"item_1": {"interestNum": 5}}
+                }
+            }
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[task]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=complete_res):
+
+            done = coins_mgr.farm_browse_tasks(count=5)
+            self.assertEqual(done, 1)  # Завдання виконалось 1 раз і зупинилось, бо сервер повернув instanceStatus=2
+            self.assertEqual(coins_mgr.completed_tasks, 1)
+            self.assertEqual(coins_mgr.task_coins_earned, 5)
+
+    def test_complete_task_resets_mutated_fields_and_logs_warning(self):
+        """Перевіряє, що _complete_task скидає поля earnedCoins, completeSuccess, errorCode та pop-ить попередні результати."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        task = {
+            "taskInstanceId": "inst_reset_test",
+            "earnedCoins": 50,
+            "completeSuccess": True,
+            "illegalCompletion": True,
+            "errorCode": "FAIL",
+            "completeResult": {"data": "old"}
+        }
+
+        with patch.object(checkin_mgr, "_call_mtop", side_effect=Exception("Network error")):
+            with patch("src.coins.logger.warning") as mock_warn:
+                ok = coins_mgr._complete_task(task)
+                self.assertFalse(ok)
+                self.assertEqual(task.get("earnedCoins"), 0)
+                self.assertFalse(task.get("completeSuccess"))
+                self.assertNotIn("illegalCompletion", task)
+                self.assertNotIn("errorCode", task)
+                self.assertNotIn("completeResult", task)
+                mock_warn.assert_called_once()
+                self.assertIn("Network error", str(mock_warn.call_args))
+
+    def test_claim_task_reward_only_called_when_manual_claim_needed(self):
+        """Перевіряє, що _claim_task_reward викликається лише при issueHandle==1 або unIssueRecord, і не викликається при issueHandle==0."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        # 1. Завдання з issueHandle == 0 (автоматичне нарахування) та earned == 0 -> клейм НЕ викликається
+        task_auto = {
+            "taskInstanceId": "inst_auto",
+            "taskTitle": "Browse items for 15s",
+            "taskType": 0,
+            "status": "todo",
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/browse",
+            "issueHandle": 0
+        }
+        # process.complete повертає успіх, але 0 монет
+        res_complete_0 = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {"result": {"completeSuccess": True}}
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[task_auto]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=res_complete_0), \
+             patch.object(coins_mgr, "_claim_task_reward") as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            mock_claim.assert_not_called()
+
+        # 2. Завдання з issueHandle == 1 -> клейм ВИКЛИКАЄТЬСЯ
+        task_manual = {
+            "taskInstanceId": "inst_manual",
+            "taskTitle": "Browse items for 15s",
+            "taskType": 0,
+            "status": "todo",
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/browse",
+            "issueHandle": 1
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[task_manual]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=res_complete_0), \
+             patch.object(coins_mgr, "_claim_task_reward", return_value=15) as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            mock_claim.assert_called_once()
+            self.assertEqual(coins_mgr.task_coins_earned, 15)
+
+    def test_is_safe_task_stricter_whitelist_and_string_behavior_config(self):
+        """Перевіряє, що тип 1 без safe-ознак відхиляється, behaviorConfig у вигляді str коректно парситься, а таски без URL відхиляються."""
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        # Тип 1 без ключових слів перегляду і без browseZeroFlag -> відхиляється
+        task_generic_type1 = {
+            "taskTitle": "Mystery Box Activity",
+            "taskType": 1,
+            "actionUrl": "https://aliexpress.com/mystery",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(task_generic_type1))
+
+        # behaviorConfig як JSON-рядок з taskTagId (міні-гра) -> відхиляється
+        task_str_cfg = {
+            "taskTitle": "Water the plant",
+            "behaviorConfig": '{"taskTagId": "watering2.0"}',
+            "actionUrl": "https://aliexpress.com/game",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(task_str_cfg))
+
+        # Завдання без actionUrl (не waitforreceive) -> відхиляється
+        task_no_url = {
+            "taskTitle": "Browse items for 15s",
+            "actionUrl": "",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(task_no_url))
+
+    def test_is_safe_task_word_boundaries_dont_block_safe_urls(self):
+        """Перевіряє, що підрядки на зразок card_order або data_binding у URL не блокуються фільтром безпеки."""
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        safe_url_task = {
+            "taskTitle": "Explore sponsored items",
+            "taskType": 0,
+            "actionUrl": "https://aliexpress.com/category?layout=card_order&binding=data_binding",
+            "status": "todo"
+        }
+        self.assertTrue(mgr.is_safe_task(safe_url_task))
+
+        # Але точний збіг забороненого шляху /order або /cart блокується
+        unsafe_url_task = {
+            "taskTitle": "Explore items",
+            "taskType": 0,
+            "actionUrl": "https://aliexpress.com/order/confirmation",
+            "status": "todo"
+        }
+        self.assertFalse(mgr.is_safe_task(unsafe_url_task))
+
+    def test_farm_browse_tasks_default_count_15_and_session_limit_marks_skipped(self):
+        """Перевіряє дефолт count=15 та маркування невиконаних безпечних завдань як SKIPPED при досягненні ліміту."""
+        import inspect
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        sig = inspect.signature(coins_mgr.farm_browse_tasks)
+        self.assertEqual(sig.parameters["count"].default, 15)
+
+        tasks = [
+            {
+                "taskId": f"t_{i}",
+                "taskTitle": f"Browse deal #{i}",
+                "taskType": 0,
+                "status": "todo",
+                "timesLimit": 1,
+                "timesJoined": 0,
+                "staySeconds": 15,
+                "actionUrl": f"https://aliexpress.com/item/{i}.html",
+                "issueHandle": 0
+            }
+            for i in range(1, 4)
+        ]
+        complete_res = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {"result": {"completeSuccess": True, "interestIssueResultMap": {"it": {"interestNum": 5}}}}
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=tasks), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=complete_res):
+
+            # Встановлюємо count=1, тому t_1 виконається, а t_2 і t_3 мають потрапити у task_records як SKIPPED
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins_mgr.completed_tasks, 1)
+            self.assertEqual(coins_mgr.tasks_completed, 1)
+            self.assertEqual(coins_mgr.tasks_skipped, 2)
+            self.assertEqual(len(coins_mgr.task_records), 3)
+
+            self.assertEqual(coins_mgr.task_records[0]["task_id"], "t_1")
+            self.assertEqual(coins_mgr.task_records[0]["status"], "COMPLETED")
+
+            self.assertEqual(coins_mgr.task_records[1]["task_id"], "t_2")
+            self.assertEqual(coins_mgr.task_records[1]["status"], "SKIPPED")
+            self.assertEqual(coins_mgr.task_records[1]["reason"], "Перевищено ліміт завдань на сесію")
+
+            self.assertEqual(coins_mgr.task_records[2]["task_id"], "t_3")
+            self.assertEqual(coins_mgr.task_records[2]["status"], "SKIPPED")
+            self.assertEqual(coins_mgr.task_records[2]["reason"], "Перевищено ліміт завдань на сесію")
 
 
 if __name__ == "__main__":

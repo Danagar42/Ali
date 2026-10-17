@@ -49,12 +49,13 @@ UNSAFE_KEYWORDS = (
     "follow", "share", "deal_amount", "bind", "install",
     "покупка", "купити", "замовлення", "кошик", "підписка"
 )
+UNSAFE_REGEX = re.compile(r'(?i)\b(' + '|'.join(re.escape(w) for w in UNSAFE_KEYWORDS) + r')\b')
 
 # Безпечні типи завдань (тільки пасивний перегляд / очікування 15 секунд)
-SAFE_TASK_TYPES = {0, "0", 1, "1", 3, "3", "browse", "browse_item", "search", "view"}
+SAFE_TASK_TYPES = {0, "0", "browse", "browse_item", "search", "view"}
 SAFE_KEYWORDS = (
-    "browse", "view", "explore", "visit", "check", "find",
-    "15s", "30s", "15 sec", "секунд", "перегляд", "пошук", "coins"
+    "browse", "view", "explore", "visit", "find",
+    "15s", "30s", "15 sec", "секунд", "перегляд", "пошук"
 )
 
 
@@ -171,7 +172,10 @@ def _extract_coins_from_complete_result(res: Dict[str, Any], task: Optional[Dict
         data_dict = {}
 
     # 1. Основний формат AliExpress MTOP: interestIssueResultMap
-    issue_map = data_dict.get("interestIssueResultMap")
+    res_dict = data_dict.get("result") if isinstance(data_dict.get("result"), dict) else data_dict
+    issue_map = res_dict.get("interestIssueResultMap") if isinstance(res_dict, dict) else None
+    if not issue_map and isinstance(data_dict, dict):
+        issue_map = data_dict.get("interestIssueResultMap")
     if isinstance(issue_map, dict):
         for interest_id, item in issue_map.items():
             if not isinstance(item, dict):
@@ -629,86 +633,105 @@ class CoinsFarmManager:
 
         return []
 
+    def classify_task(self, task: Dict[str, Any]) -> Tuple[bool, str, str]:
+        """
+        Класифікує завдання за безпекою та доступністю для виконання.
+        Повертає кортеж (is_safe, status, reason).
+        """
+        if not isinstance(task, dict):
+            return False, "SKIPPED", "Некоректні дані завдання"
+
+        status = str(task.get("status", "")).lower()
+        if status in ("completed", "finished", "done"):
+            return False, "ALREADY_DONE", "Вже виконано сьогодні раніше"
+
+        # Безпечний парсинг behaviorConfig
+        cfg = {}
+        raw_cfg = task.get("behaviorConfig")
+        if isinstance(raw_cfg, str) and raw_cfg.strip().startswith("{"):
+            try:
+                cfg = json.loads(raw_cfg)
+            except Exception:
+                cfg = {}
+        elif isinstance(raw_cfg, dict):
+            cfg = raw_cfg
+
+        task_tag_id = task.get("taskTagId") or cfg.get("taskTagId")
+        raw_type = task.get("rawType") if task.get("rawType") is not None else task.get("type")
+
+        # Відсіюємо зовнішні дії та міні-ігри: taskTagId або raw_type == 30
+        if task_tag_id or str(raw_type) == "30" or _clean_int(raw_type) == 30:
+            logger.debug(f"[{self.account_name}] 🎮 Пропущено зовнішню дію / міні-гру (tag: {task_tag_id}, type: {raw_type}): {task.get('taskTitle')}")
+            return False, "SKIPPED", "Зовнішня дія / міні-гра"
+
+        is_claim_only = status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord"))
+
+        instance_status = task.get("instanceStatus")
+        clean_instance_status = _clean_int(instance_status) if instance_status is not None else None
+        if clean_instance_status == 2:
+            return False, "ALREADY_DONE", "Вже виконано сьогодні раніше"
+
+        if clean_instance_status not in (0, None) and not is_claim_only:
+            return False, "SKIPPED", f"Неактивний статус (instanceStatus={instance_status})"
+
+        times_limit = _clean_int(task.get("timesLimit", 1))
+        times_joined = _clean_int(task.get("timesJoined", 0))
+        if times_limit > 0 and times_joined >= times_limit and not is_claim_only:
+            return False, "SKIPPED", f"Всі спроби вичерпано ({times_joined}/{times_limit})"
+
+        # Перевірка на небезпечні ключові слова через word boundaries (\b)
+        text_repr = " ".join([
+            str(task.get("taskTitle", "")),
+            str(task.get("taskType", "")),
+            str(task.get("actionUrl", "")),
+            str(task.get("actionType", ""))
+        ])
+        if UNSAFE_REGEX.search(text_repr):
+            logger.debug(f"[{self.account_name}] 🚫 Пропущено небезпечне завдання: {task.get('taskTitle')}")
+            return False, "SKIPPED", "Небезпечна дія (покупка/підписка/кошик)"
+
+        # Відсіюємо щоденний чекін без URL
+        task_title_lower = str(task.get("taskTitle", "")).lower()
+        if "daily check" in task_title_lower and not task.get("actionUrl"):
+            logger.debug(f"[{self.account_name}] ℹ️ Пропущено 'Daily check-in' без URL перегляду: {task.get('taskTitle')}")
+            return False, "SKIPPED", "Щоденний чекін без URL для перегляду"
+
+        # Якщо це готова нагорода для забирання монет
+        if is_claim_only:
+            return True, "CLAIM", "Готово до отримання нагороди"
+
+        # Для завдань на перегляд обов'язкова наявність actionUrl
+        if not task.get("actionUrl"):
+            return False, "SKIPPED", "Відсутній URL для перегляду"
+
+        # Справжні завдання перегляду: browseZeroFlag is True або raw_type == 0
+        browse_zero = bool(task.get("browseZeroFlag") or cfg.get("browseZeroFlag"))
+        if browse_zero or (raw_type is not None and _clean_int(raw_type) == 0):
+            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+
+        task_type = task.get("taskType")
+        if task_type in (0, "0") or _clean_int(task_type) == 0:
+            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+
+        if task_type in SAFE_TASK_TYPES or str(task_type).lower() in SAFE_TASK_TYPES:
+            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+
+        text_repr_lower = text_repr.lower()
+        if any(safe_word in text_repr_lower for safe_word in SAFE_KEYWORDS):
+            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+
+        return False, "SKIPPED", "Фільтр безпеки: непідтримуваний тип"
+
     def is_safe_task(self, task: Dict[str, Any]) -> bool:
         """
         Жорсткий фільтр безпеки: повертає True для безпечних пасивних завдань
         (перегляд сторінок/товарів ~15 секунд або забирання вже готової нагороди).
         Всі покупки, додавання в кошик, підписки чи зовнішні дії/міні-ігри відхиляються.
         """
-        if not isinstance(task, dict):
-            return False
+        is_safe, _, _ = self.classify_task(task)
+        return is_safe
 
-        status = str(task.get("status", "")).lower()
-        if status in ("completed", "finished", "done"):
-            return False
-
-        # Відсіюємо завдання, де instanceStatus != 0 (якщо це не готова нагорода)
-        instance_status = task.get("instanceStatus")
-        if instance_status is not None and _clean_int(instance_status) not in (0, None):
-            if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
-                return False
-
-        # Відсіюємо завдання, де всі повтори вже виконано (timesJoined >= timesLimit)
-        times_limit = _clean_int(task.get("timesLimit", 1))
-        times_joined = _clean_int(task.get("timesJoined", 0))
-        if times_limit > 0 and times_joined >= times_limit:
-            if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
-                return False
-
-        # Відсіюємо зовнішні дії та міні-ігри: taskTagId або raw_type == 30
-        cfg = task.get("behaviorConfig") if isinstance(task.get("behaviorConfig"), dict) else {}
-        task_tag_id = task.get("taskTagId") or cfg.get("taskTagId")
-        raw_type = task.get("rawType") if task.get("rawType") is not None else task.get("type")
-
-        if task_tag_id or str(raw_type) == "30" or _clean_int(raw_type) == 30:
-            logger.debug(f"[{self.account_name}] 🎮 Пропущено зовнішню дію / міні-гру (tag: {task_tag_id}, type: {raw_type}): {task.get('taskTitle')}")
-            return False
-
-        # Об'єднуємо всі текстові поля для перевірки на заборонені дії
-        text_repr = " ".join([
-            str(task.get("taskTitle", "")),
-            str(task.get("taskType", "")),
-            str(task.get("actionUrl", "")),
-            str(task.get("actionType", ""))
-        ]).lower()
-
-        # Якщо є хоча б одне ризиковане ключове слово — завдання НЕ виконується
-        if any(bad_word in text_repr for bad_word in UNSAFE_KEYWORDS):
-            logger.debug(f"[{self.account_name}] 🚫 Пропущено небезпечне завдання: {task.get('taskTitle')}")
-            return False
-
-        # Відсіюємо "Daily check-in" без URL для перегляду (він виконується в модулі checkin)
-        task_title_lower = str(task.get("taskTitle", "")).lower()
-        if "daily check" in task_title_lower and not task.get("actionUrl"):
-            logger.debug(f"[{self.account_name}] ℹ️ Пропущено 'Daily check-in' без URL перегляду: {task.get('taskTitle')}")
-            return False
-
-        # Якщо завдання вже виконане і очікує лише клейму (waitForReceive) — безпечно забрати монети!
-        if status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord")):
-            return True
-
-        # Справжні завдання перегляду: browseZeroFlag is True або raw_type == 0
-        browse_zero = bool(task.get("browseZeroFlag") or cfg.get("browseZeroFlag"))
-        if browse_zero:
-            return True
-
-        if raw_type in (0, "0") or _clean_int(raw_type) == 0:
-            return True
-
-        task_type = task.get("taskType")
-        if task_type in (0, "0") or _clean_int(task_type) == 0:
-            return True
-
-        # Підтримка для legacy та тестових завдань (SAFE_TASK_TYPES: 1, 3, "browse", "search")
-        if task_type in SAFE_TASK_TYPES or str(task_type).lower() in SAFE_TASK_TYPES:
-            return True
-
-        if any(safe_word in text_repr for safe_word in SAFE_KEYWORDS):
-            return True
-
-        return False
-
-    def farm_browse_tasks(self, count: int = MAX_SAFE_TASKS_PER_RUN) -> int:
+    def farm_browse_tasks(self, count: int = 15) -> int:
         """
         Виконує безпечні завдання із затримкою та нарахуванням монет (підтримка timesLimit).
         """
@@ -773,43 +796,12 @@ class CoinsFarmManager:
 
             safe_tasks = []
             for t in active_tasks:
-                if self.is_safe_task(t):
+                is_safe, rec_status, reason = self.classify_task(t)
+                if is_safe:
                     safe_tasks.append(t)
                 else:
                     self.tasks_skipped += 1
                     t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
-                    t_status_str = str(t.get("status", "")).lower()
-                    text_repr = " ".join([
-                        str(t.get("taskTitle", "")),
-                        str(t.get("taskType", "")),
-                        str(t.get("actionUrl", "")),
-                        str(t.get("actionType", ""))
-                    ]).lower()
-                    instance_status = t.get("instanceStatus")
-                    times_limit = _clean_int(t.get("timesLimit", 1))
-                    times_joined = _clean_int(t.get("timesJoined", 0))
-
-                    cfg = t.get("behaviorConfig") if isinstance(t.get("behaviorConfig"), dict) else {}
-                    task_tag_id = t.get("taskTagId") or cfg.get("taskTagId")
-                    raw_type = t.get("rawType") if t.get("rawType") is not None else t.get("type")
-
-                    rec_status = "SKIPPED"
-
-                    if instance_status == 2 or _clean_int(instance_status) == 2 or t_status_str in ("completed", "finished", "done"):
-                        rec_status = "ALREADY_DONE"
-                        reason = "Вже виконано сьогодні раніше"
-                    elif task_tag_id or str(raw_type) == "30" or _clean_int(raw_type) == 30:
-                        reason = "Зовнішня дія / міні-гра"
-                    elif instance_status is not None and _clean_int(instance_status) not in (0, None) and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
-                        reason = f"Неактивний статус (instanceStatus={instance_status})"
-                    elif times_limit > 0 and times_joined >= times_limit and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
-                        reason = f"Всі спроби вичерпано ({times_joined}/{times_limit})"
-                    elif any(bw in text_repr for bw in UNSAFE_KEYWORDS):
-                        reason = "Небезпечна дія (покупка/підписка/кошик)"
-                    elif "daily check" in t_title.lower() and not t.get("actionUrl"):
-                        reason = "Щоденний чекін без URL для перегляду"
-                    else:
-                        reason = "Фільтр безпеки: непідтримуваний тип"
                     self.task_records.append({
                         "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
                         "title": t_title,
@@ -899,10 +891,12 @@ class CoinsFarmManager:
                         complete_ok = self._complete_task(task)
                         earned = task.get("earnedCoins", 0)
 
-                        # Клейм монет викликаємо лише якщо complete_ok успішний і сервер не нарахував їх автоматично в process.complete.
+                        # Клейм монет викликаємо лише якщо complete_ok успішний і завдання потребує ручного клейму
+                        # (issueHandle == 1 або unIssueRecord).
                         # При ILLEGAL_COMPLETION або неуспішному complete_ok клейм НІКОЛИ не викликається!
                         coins_claimed = -1
-                        if complete_ok and earned <= 0 and not task.get("illegalCompletion"):
+                        needs_manual_claim = bool(task.get("unIssueRecord")) or _clean_int(task.get("issueHandle", 0)) == 1
+                        if complete_ok and earned <= 0 and needs_manual_claim and not task.get("illegalCompletion"):
                             coins_claimed = self._claim_task_reward(task)
                             if coins_claimed > 0:
                                 earned = coins_claimed
@@ -935,12 +929,13 @@ class CoinsFarmManager:
 
                         # Перевіряємо, чи сервер повернув фініш завдання
                         comp_res = task.get("completeResult", {})
-                        comp_data = comp_res.get("data", {}) if isinstance(comp_res, dict) and isinstance(comp_res.get("data"), dict) else {}
-                        server_status = comp_data.get("instanceStatus")
-                        server_joined = comp_data.get("timesJoined")
-                        server_limit = comp_data.get("timesLimit")
+                        comp_data = comp_res.get("data", {}) if isinstance(comp_res, dict) else {}
+                        comp_result = comp_data.get("result", {}) if isinstance(comp_data, dict) and isinstance(comp_data.get("result"), dict) else (comp_data if isinstance(comp_data, dict) else {})
+                        server_status = _clean_int(comp_result.get("instanceStatus"))
+                        server_joined = _clean_int(comp_result.get("timesJoined"))
+                        server_limit = _clean_int(comp_result.get("timesLimit"))
 
-                        if server_status == 2 or (server_joined is not None and server_limit is not None and server_joined >= server_limit):
+                        if server_status == 2 or (server_limit > 0 and server_joined >= server_limit):
                             logger.info(f"[{self.account_name}] ℹ️ Завдання '{title}' завершило всі доступні повтори ({server_joined}/{server_limit}).")
                             break
 
@@ -1026,6 +1021,12 @@ class CoinsFarmManager:
         """
         Відправляє запит завершення безпечного завдання до MTOP шлюзу.
         """
+        task["earnedCoins"] = 0
+        task["completeSuccess"] = False
+        task.pop("illegalCompletion", None)
+        task.pop("errorCode", None)
+        task.pop("completeResult", None)
+
         task_id = task.get("taskInstanceId") or task.get("taskId")
         if not task_id:
             return False
@@ -1100,7 +1101,7 @@ class CoinsFarmManager:
                         task["illegalCompletion"] = True
                 logger.warning(f"[{self.account_name}] ⚠️ _complete_task для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
-            logger.error(f"[{self.account_name}] ❌ Виняток під час _complete_task: {e}")
+            logger.warning(f"[{self.account_name}] ⚠️ Помилка у _complete_task: {e}")
 
         task["earnedCoins"] = 0
         self.last_complete_coins = 0
