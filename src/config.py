@@ -147,4 +147,5 @@ TASK_UMID_TOKEN = os.getenv("TASK_UMID_TOKEN", "T2gA1jIALVYecdoa1onvC24McgCfk9c4
 TASK_BX_UMIDTOKEN = os.getenv("TASK_BX_UMIDTOKEN", "T2gAJf8iJkyJCy1iYOyIw3Mx_GChuoEw_ds8gFo3GJfC_qzqm2SJRF4_f2cB9u2NtoI=")
 TASK_MTOP_APP_KEY = os.getenv("TASK_MTOP_APP_KEY", "24815441")
 TASK_PLATFORM_CANDIDATES = ["android", "wireless", "h5", "app", "iOS"]
+MAX_SAFE_TASKS_PER_RUN = int(os.getenv("MAX_SAFE_TASKS_PER_RUN", "15"))
 

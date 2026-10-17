@@ -32,7 +32,7 @@ def setup_logging():
 setup_logging()
 logger = logging.getLogger("AliExpressFarmer")
 
-from src.config import SKIP_RANDOM_SLEEP, MAX_START_SLEEP_SECONDS
+from src.config import SKIP_RANDOM_SLEEP, MAX_START_SLEEP_SECONDS, MAX_SAFE_TASKS_PER_RUN
 from src.auth import load_accounts
 from src.client import AliClient
 from src.checkin import CheckinManager
@@ -91,13 +91,22 @@ def main():
             checkin_mgr = CheckinManager(client)
             checkin_ok = checkin_mgr.run_checkin()
 
+            # Фіксуємо баланс після чекіну для порівняння
+            pre_task_coins = checkin_mgr.total_coins if isinstance(checkin_mgr.total_coins, (int, float)) else None
+
             # 3.2 Фарм монет за перегляд безпечних завдань (~15 сек)
             coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
-            coins_done = coins_mgr.farm_browse_tasks(count=4)
+            coins_done = coins_mgr.farm_browse_tasks(count=MAX_SAFE_TASKS_PER_RUN)
 
             # 3.3 Збір купонів
             coupon_mgr = CouponCollector(client, checkin_mgr=checkin_mgr)
             coupons_done = coupon_mgr.collect_available_coupons()
+
+            # 3.4 Оновлюємо актуальний баланс монет після виконання всіх завдань
+            try:
+                checkin_mgr._fetch_coin_balance()
+            except Exception as e:
+                logger.debug(f"[{account_name}] Не вдалося оновити баланс монет після завдань: {e}")
 
             # Облік зароблених монет (чекін + безпечні завдання)
             task_coins = getattr(coins_mgr, "task_coins_earned", 0)
@@ -106,10 +115,21 @@ def main():
             earned_from_checkin = checkin_mgr.coins_earned if isinstance(checkin_mgr.coins_earned, (int, float)) else 0
             total_earned_today = earned_from_checkin + int(task_coins)
 
-            checkin_total = checkin_mgr.total_coins if isinstance(checkin_mgr.total_coins, (int, float)) else None
-            account_total_coins = checkin_total
-            if account_total_coins is not None and task_coins > 0:
-                account_total_coins += int(task_coins)
+            post_task_coins = checkin_mgr.total_coins if isinstance(checkin_mgr.total_coins, (int, float)) else None
+            if post_task_coins is not None and pre_task_coins is not None:
+                if post_task_coins > pre_task_coins:
+                    account_total_coins = post_task_coins
+                else:
+                    account_total_coins = pre_task_coins + int(task_coins)
+            elif post_task_coins is not None:
+                account_total_coins = post_task_coins
+            elif pre_task_coins is not None:
+                account_total_coins = pre_task_coins + int(task_coins)
+            else:
+                account_total_coins = None
+
+            if account_total_coins is not None:
+                checkin_mgr.total_coins = account_total_coins
 
             # Розрахунок початкового балансу до чекіну та завдань
             init_c = getattr(checkin_mgr, "initial_coins", None)
@@ -209,13 +229,18 @@ def main():
         logger.info(f"   ├ Канал Mobile: {s.mobile_status or '-'} (+{mob_c} 🪙{mob_note})")
         logger.info(f"   ├ Інтерактивні таски: {s.tasks_done} вик. (+{tasks_c} 🪙), {s.tasks_skipped} пропущ., {s.tasks_failed} збій")
         if s.task_details:
-            for td in s.task_details[:6]:
+            sorted_td = sorted(
+                s.task_details,
+                key=lambda x: 0 if isinstance(x, dict) and x.get("status") == "COMPLETED"
+                else (1 if isinstance(x, dict) and x.get("status") == "FAILED" else 2)
+            )
+            for td in sorted_td[:10]:
                 st_icon = "✅" if td.get("status") == "COMPLETED" else ("⏭️" if td.get("status") == "SKIPPED" else "❌")
                 coins_s = f" (+{td.get('coins')} 🪙)" if td.get("coins", 0) > 0 else ""
                 reason_s = f" ({td.get('reason')})" if td.get("reason") else ""
                 logger.info(f"   │   {st_icon} {td.get('title')}{coins_s}{reason_s}")
-            if len(s.task_details) > 6:
-                logger.info(f"   │   ... ще {len(s.task_details) - 6} завдань")
+            if len(sorted_td) > 10:
+                logger.info(f"   │   ... ще {len(sorted_td) - 10} завдань")
         logger.info(f"   ├ Зібрано купонів: {s.coupons_claimed}")
         if s.coupon_details:
             for cd in s.coupon_details[:3]:

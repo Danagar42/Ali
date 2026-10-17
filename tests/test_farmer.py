@@ -48,7 +48,7 @@ from src.checkin import (
     _extract_prize_coins,
     _extract_node_streak
 )
-from src.coins import CoinsFarmManager, REPORT_TASK_URLS
+from src.coins import CoinsFarmManager, REPORT_TASK_URLS, _extract_coins_from_complete_result
 from src.coupons import CouponCollector
 import src.main as main_module
 
@@ -4530,6 +4530,233 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             call_kwargs_claim = mock_call.call_args[1]
             self.assertEqual(call_kwargs_claim["data"]["groupId"], 548001)
             self.assertEqual(call_kwargs_claim["data"]["interestCode"], "5PX4SF8J")
+
+
+    def test_extract_coins_from_complete_result_interest_map(self):
+        """Перевіряє коректне вилучення монет із реальної структури interestIssueResultMap."""
+        # 1. Реальна структура з AliExpress
+        res = {
+            "api": "mtop.aliexpress.interactive.task.process.complete",
+            "data": {
+                "completeSuccess": True,
+                "instanceStatus": 0,
+                "interestIssueResultMap": {
+                    "873039490107": {
+                        "interestNum": 5,
+                        "issueHandleResult": True,
+                        "issueObject": '{"fromAccountPointCount":10,"transferPointCount":5}'
+                    }
+                },
+                "timesJoined": 1,
+                "timesLimit": 2
+            },
+            "ret": ["SUCCESS::调用成功"]
+        }
+        coins = _extract_coins_from_complete_result(res)
+        self.assertEqual(coins, 5)
+
+        # 2. Декілька винагород у мапі
+        multi_res = {
+            "data": {
+                "interestIssueResultMap": {
+                    "task_1": {"interestNum": 5},
+                    "task_2": {"issueObject": '{"transferPointCount": 10}'}
+                }
+            }
+        }
+        self.assertEqual(_extract_coins_from_complete_result(multi_res), 15)
+
+        # 3. Fallback структура
+        fallback_res = {
+            "data": {
+                "success": True,
+                "awardCoins": 25
+            }
+        }
+        self.assertEqual(_extract_coins_from_complete_result(fallback_res), 25)
+
+    def test_complete_task_auto_extracts_coins_from_interest_map(self):
+        """Перевіряє, що _complete_task витягує монети та зберігає результат у task['earnedCoins']."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        task_data = {
+            "taskInstanceId": "inst_task_map_1",
+            "taskType": 1,
+            "status": "todo"
+        }
+        complete_res = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "completeSuccess": True,
+                "instanceStatus": 0,
+                "interestIssueResultMap": {
+                    "item_1": {
+                        "interestNum": 5,
+                        "issueHandleResult": True
+                    }
+                },
+                "timesJoined": 1,
+                "timesLimit": 2
+            }
+        }
+        with patch.object(checkin_mgr, "_call_mtop", return_value=complete_res):
+            ok = coins_mgr._complete_task(task_data)
+            self.assertTrue(ok)
+            self.assertEqual(task_data.get("earnedCoins"), 5)
+            self.assertEqual(coins_mgr.last_complete_coins, 5)
+
+    def test_farm_browse_tasks_auto_claim_skips_process_issue(self):
+        """Якщо монети автоматично нараховані у process.complete, _claim_task_reward не викликається."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        safe_task = {
+            "taskInstanceId": "inst_auto_claim",
+            "taskTitle": "Explore sponsored items",
+            "taskType": 1,
+            "status": "todo",
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/browse"
+        }
+        complete_res = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "completeSuccess": True,
+                "instanceStatus": 2,
+                "interestIssueResultMap": {
+                    "item_auto": {
+                        "interestNum": 5,
+                        "issueHandleResult": True
+                    }
+                },
+                "timesJoined": 1,
+                "timesLimit": 1
+            }
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[safe_task]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=complete_res), \
+             patch.object(coins_mgr, "_claim_task_reward") as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=5)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins_mgr.completed_tasks, 1)
+            self.assertEqual(coins_mgr.task_coins_earned, 5)
+            # Переконуємось, що _claim_task_reward НЕ викликався через те, що монети вже нараховані
+            mock_claim.assert_not_called()
+            self.assertEqual(len(coins_mgr.task_records), 1)
+            self.assertEqual(coins_mgr.task_records[0]["coins"], 5)
+            self.assertEqual(coins_mgr.task_records[0]["status"], "COMPLETED")
+
+    def test_farm_browse_tasks_multi_run_times_limit(self):
+        """Перевіряє багаторазове виконання завдання при timesLimit = 2."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        multi_task = {
+            "taskInstanceId": "inst_multi_run",
+            "taskTitle": "View Super discounts",
+            "taskType": 1,
+            "status": "todo",
+            "timesLimit": 2,
+            "timesJoined": 0,
+            "staySeconds": 15,
+            "actionUrl": "https://aliexpress.com/discounts"
+        }
+        resp1 = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "completeSuccess": True,
+                "instanceStatus": 0,
+                "interestIssueResultMap": {"item_1": {"interestNum": 5}},
+                "timesJoined": 1,
+                "timesLimit": 2
+            }
+        }
+        resp2 = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "completeSuccess": True,
+                "instanceStatus": 2,
+                "interestIssueResultMap": {"item_2": {"interestNum": 5}},
+                "timesJoined": 2,
+                "timesLimit": 2
+            }
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[multi_task]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", side_effect=[resp1, resp2]):
+
+            done = coins_mgr.farm_browse_tasks(count=5)
+            self.assertEqual(done, 2)
+            self.assertEqual(coins_mgr.completed_tasks, 2)
+            self.assertEqual(coins_mgr.task_coins_earned, 10)
+            self.assertEqual(len(coins_mgr.task_records), 2)
+            self.assertIn("(1/2)", coins_mgr.task_records[0]["title"])
+            self.assertEqual(coins_mgr.task_records[0]["coins"], 5)
+            self.assertIn("(2/2)", coins_mgr.task_records[1]["title"])
+            self.assertEqual(coins_mgr.task_records[1]["coins"], 5)
+
+    def test_main_post_task_balance_refresh(self):
+        """Перевіряє оновлення підсумкового балансу монет після виконання тасок."""
+        with patch("src.main.initial_random_jitter"), \
+             patch("src.main.AliClient") as mock_client_cls, \
+             patch("src.main.CheckinManager") as mock_chk_cls, \
+             patch("src.main.CoinsFarmManager") as mock_coins_cls, \
+             patch("src.main.CouponCollector") as mock_coupon_cls, \
+             patch("src.main.NotificationDispatcher") as mock_disp_cls, \
+             patch("src.main.load_accounts", return_value=[("Acc_1", {"_m_h5_tk": "tk123"})]):
+
+            mock_chk = MagicMock()
+            mock_chk.status = "SUCCESS"
+            mock_chk.coins_earned = 30
+            mock_chk.streak_days = 5
+            mock_chk.total_coins = 504
+            mock_chk.initial_coins = 474
+            mock_chk.session_valid = True
+            mock_chk.pc_status = "SUCCESS"
+            mock_chk.pc_coins = 0
+            mock_chk.mobile_status = "SUCCESS"
+            mock_chk.mobile_coins = 30
+
+            def fake_fetch_balance():
+                mock_chk.total_coins = 549
+
+            mock_chk._fetch_coin_balance.side_effect = fake_fetch_balance
+            mock_chk_cls.return_value = mock_chk
+
+            mock_coins = MagicMock()
+            mock_coins.task_coins_earned = 45
+            mock_coins.tasks_completed = 9
+            mock_coins.tasks_skipped = 2
+            mock_coins.tasks_failed = 0
+            mock_coins.task_records = []
+            mock_coins_cls.return_value = mock_coins
+
+            mock_coupon = MagicMock()
+            mock_coupon.collect_available_coupons.return_value = 0
+            mock_coupon_cls.return_value = mock_coupon
+
+            dispatcher = MagicMock()
+            mock_disp_cls.return_value = dispatcher
+
+            main_module.main()
+
+            mock_chk._fetch_coin_balance.assert_called_once()
+            self.assertEqual(dispatcher.add_summary.call_count, 1)
+            summary_arg = dispatcher.add_summary.call_args[0][0]
+            self.assertEqual(summary_arg.initial_coins, 474)
+            self.assertEqual(summary_arg.total_coins, 549)
+            self.assertEqual(summary_arg.coins_earned, 75)
+            self.assertEqual(summary_arg.tasks_coins, 45)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ from src.config import (
     TASK_TTID,
     TASK_PLATFORM,
     TASK_PLATFORM_CANDIDATES,
-    TASK_UMID_TOKEN
+    TASK_UMID_TOKEN,
+    MAX_SAFE_TASKS_PER_RUN
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,69 @@ def _extract_user_locale_params(client: Optional[AliClient] = None) -> Tuple[str
     (з конфігурації TASK_LOCALE, TASK_CURRENCY, TASK_LANG).
     """
     return TASK_LOCALE, TASK_CURRENCY, TASK_LANG
+
+
+def _extract_coins_from_complete_result(res: Dict[str, Any], task: Optional[Dict[str, Any]] = None) -> int:
+    """
+    Витягує нараховані монети з відповіді mtop.aliexpress.interactive.task.process.complete.
+    Підтримує:
+    1. interestIssueResultMap: map об'єктів з interestNum та JSON issueObject (transferPointCount).
+    2. Fallback на поля awardCoins, coinCount, transferPointCount, rewardCoinNum у nested dicts.
+    """
+    if not isinstance(res, dict):
+        return 0
+
+    total_coins = 0
+    data_dict = res.get("data")
+    if not isinstance(data_dict, dict):
+        data_dict = {}
+
+    # 1. Основний формат AliExpress MTOP: interestIssueResultMap
+    issue_map = data_dict.get("interestIssueResultMap")
+    if isinstance(issue_map, dict):
+        for interest_id, item in issue_map.items():
+            if not isinstance(item, dict):
+                continue
+            item_coins = 0
+            num_val = _clean_int(item.get("interestNum"))
+            if num_val > 0:
+                item_coins = num_val
+
+            obj_raw = item.get("issueObject")
+            if obj_raw:
+                obj_data = {}
+                if isinstance(obj_raw, str):
+                    try:
+                        obj_data = json.loads(obj_raw)
+                    except Exception:
+                        obj_data = {}
+                elif isinstance(obj_raw, dict):
+                    obj_data = obj_raw
+
+                if isinstance(obj_data, dict):
+                    t_val = _clean_int(
+                        obj_data.get("transferPointCount")
+                        or obj_data.get("pointCount")
+                        or obj_data.get("amount")
+                        or obj_data.get("coins")
+                    )
+                    if t_val > 0:
+                        item_coins = max(item_coins, t_val)
+
+            if item_coins > 0:
+                total_coins += item_coins
+
+    if total_coins > 0:
+        return total_coins
+
+    # 2. Fallback для альтернативних структур відповідей
+    for block in _collect_nested_dicts(data_dict or res):
+        for k in ("awardCoins", "coinCount", "rewardCoinNum", "prizeAmount", "transferPointCount", "interestNum"):
+            val = _clean_int(block.get(k))
+            if val > 0:
+                total_coins = max(total_coins, val)
+
+    return total_coins
 
 
 class CoinsFarmManager:
@@ -393,9 +457,10 @@ class CoinsFarmManager:
                         )
                         action_url = str(action_url).strip()
 
-                        # Тривалість перегляду (staySeconds)
+                        # Тривалість перегляду (staySeconds / time)
                         stay_seconds = (
-                            _clean_int(cfg.get("duration"))
+                            _clean_int(cfg.get("time"))
+                            or _clean_int(cfg.get("duration"))
                             or _clean_int(cfg.get("staySeconds"))
                             or _clean_int(mat.get("staySeconds"))
                             or _clean_int(it.get("staySeconds"))
@@ -410,6 +475,13 @@ class CoinsFarmManager:
                         group_id = it.get("groupId") or mat.get("groupId")
                         interest_code = mat.get("interestCode") or it.get("interestCode")
 
+                        times_limit = _clean_int(mat.get("timesLimit") or it.get("timesLimit") or 1)
+                        if times_limit <= 0:
+                            times_limit = 1
+                        times_joined = _clean_int(mat.get("timesJoined") or it.get("timesJoined") or 0)
+                        raw_issue_handle = mat.get("issueHandle") if mat.get("issueHandle") is not None else it.get("issueHandle", 0)
+                        issue_handle = _clean_int(raw_issue_handle)
+
                         normalized.append({
                             "taskId": task_id,
                             "taskInstanceId": task_id,
@@ -420,6 +492,9 @@ class CoinsFarmManager:
                             "groupId": group_id,
                             "interestCode": interest_code,
                             "instanceStatus": instance_status,
+                            "timesLimit": times_limit,
+                            "timesJoined": times_joined,
+                            "issueHandle": issue_handle,
                             "taskType": task_type,
                             "taskTitle": title,
                             "status": str(status).lower(),
@@ -518,6 +593,13 @@ class CoinsFarmManager:
             if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
                 return False
 
+        # Відсіюємо завдання, де всі повтори вже виконано (timesJoined >= timesLimit)
+        times_limit = _clean_int(task.get("timesLimit", 1))
+        times_joined = _clean_int(task.get("timesJoined", 0))
+        if times_limit > 0 and times_joined >= times_limit:
+            if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
+                return False
+
         # Об'єднуємо всі текстові поля для перевірки на заборонені дії
         text_repr = " ".join([
             str(task.get("taskTitle", "")),
@@ -552,9 +634,9 @@ class CoinsFarmManager:
 
         return False
 
-    def farm_browse_tasks(self, count: int = 4) -> int:
+    def farm_browse_tasks(self, count: int = MAX_SAFE_TASKS_PER_RUN) -> int:
         """
-        Виконує безпечні завдання із затримкою ~15 секунд та нарахуванням монет.
+        Виконує безпечні завдання із затримкою та нарахуванням монет (підтримка timesLimit).
         """
         self.completed_tasks = 0
         self.task_coins_earned = 0
@@ -590,7 +672,7 @@ class CoinsFarmManager:
                 })
                 return 0
 
-            logger.info(f"[{self.account_name}] 🛍️ Початок виконання завдань (безпечний перегляд ~15 сек, ліміт: {count})...")
+            logger.info(f"[{self.account_name}] 🛍️ Початок виконання завдань (безпечний перегляд, сесійний ліміт: {count})...")
             active_tasks = self.fetch_active_tasks()
             if self.status == "FAILED":
                 logger.error(f"[{self.account_name}] ❌ Етап виконання завдань позначено як FAILED через помилку MTOP API.")
@@ -630,8 +712,12 @@ class CoinsFarmManager:
                         str(t.get("actionType", ""))
                     ]).lower()
                     instance_status = t.get("instanceStatus")
+                    times_limit = _clean_int(t.get("timesLimit", 1))
+                    times_joined = _clean_int(t.get("timesJoined", 0))
                     if instance_status is not None and _clean_int(instance_status) not in (0, None) and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
                         reason = f"Неактивний статус (instanceStatus={instance_status})"
+                    elif times_limit > 0 and times_joined >= times_limit and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
+                        reason = f"Всі спроби вичерпано ({times_joined}/{times_limit})"
                     elif t_status_str in ("completed", "finished", "done"):
                         reason = "Вже виконано раніше"
                     elif any(bw in text_repr for bw in UNSAFE_KEYWORDS):
@@ -650,26 +736,27 @@ class CoinsFarmManager:
 
             if safe_tasks:
                 safe_tasks.sort(key=lambda t: 0 if (t.get("status") in ("waitforreceive", "wait_for_receive") or t.get("unIssueRecord")) else 1)
-                tasks_to_run = safe_tasks[:count]
-                for t in safe_tasks[count:]:
-                    self.tasks_skipped += 1
-                    t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
-                    self.task_records.append({
-                        "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
-                        "title": t_title,
-                        "status": "SKIPPED",
-                        "coins": 0,
-                        "reason": "Перевищено ліміт завдань на сесію"
-                    })
 
-                for idx, task in enumerate(tasks_to_run, 1):
+                for idx, task in enumerate(safe_tasks, 1):
+                    if self.completed_tasks >= count:
+                        self.tasks_skipped += 1
+                        t_title = task.get("taskTitle") or f"Завдання {task.get('taskId')}"
+                        self.task_records.append({
+                            "task_id": str(task.get("taskId") or task.get("taskInstanceId") or "UNKNOWN"),
+                            "title": t_title,
+                            "status": "SKIPPED",
+                            "coins": 0,
+                            "reason": "Перевищено ліміт завдань на сесію"
+                        })
+                        continue
+
                     title = task.get("taskTitle", f"Завдання #{idx}")
                     status = task.get("status", "")
                     task_id = str(task.get("taskId") or task.get("taskInstanceId") or f"TASK_{idx}")
                     is_claim_only = status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord"))
 
                     if is_claim_only:
-                        logger.info(f"[{self.account_name}] 🎁 [{idx}/{len(tasks_to_run)}] Забирання нагороди за виконане завдання: '{title}'...")
+                        logger.info(f"[{self.account_name}] 🎁 [{idx}/{len(safe_tasks)}] Забирання нагороди за виконане завдання: '{title}'...")
                         coins = self._claim_task_reward(task)
                         if coins >= 0:
                             self.completed_tasks += 1
@@ -693,50 +780,87 @@ class CoinsFarmManager:
                             })
                         continue
 
-                    # Виконання завдання з очікуванням 15-18 секунд
+                    # Розрахунок доступних повторів завдання (timesLimit - timesJoined)
+                    times_limit = _clean_int(task.get("timesLimit", 1))
+                    times_joined = _clean_int(task.get("timesJoined", 0))
+                    target_runs = max(1, times_limit - times_joined)
+
                     target_url = task.get("actionUrl")
-                    stay_seconds = max(15, min(task.get("staySeconds", 15), 30))
-                    if target_url:
-                        logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(tasks_to_run)}] [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {target_url}...")
-                        try:
-                            self.client.get(target_url)
-                        except Exception as e:
-                            logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
-                    else:
-                        logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(tasks_to_run)}] [Безпечне завдання] '{title}': пасивне очікування ({stay_seconds} сек)...")
+                    req_seconds = _clean_int(task.get("staySeconds", 15))
+                    if req_seconds <= 0:
+                        req_seconds = 15
+                    stay_seconds = max(1, min(req_seconds, 30))
 
-                    # Реальна пауза 15-18 секунд для зарахування перегляду на сервері AliExpress
-                    self.client.sleep_random(stay_seconds + 0.2, stay_seconds + 2.5)
+                    for run_idx in range(1, target_runs + 1):
+                        if self.completed_tasks >= count:
+                            logger.info(f"[{self.account_name}] Досягнуто ліміт завдань на сесію ({count}).")
+                            break
 
-                    # Фіксація завершення завдання
-                    complete_ok = self._complete_task(task)
+                        run_label = f" ({run_idx}/{target_runs})" if target_runs > 1 else ""
+                        run_task_id = f"{task_id}_{run_idx}" if target_runs > 1 else task_id
 
-                    # Забирання нагороди (клейм монет)
-                    coins = self._claim_task_reward(task)
-                    if complete_ok or coins >= 0:
-                        earned = coins if coins > 0 else 0
-                        self.completed_tasks += 1
-                        self.tasks_completed += 1
-                        if earned > 0:
-                            self.task_coins_earned += earned
-                        status_reason = "Успішно переглянуто та зараховано" if coins >= 0 else "Переглянуто, але нагороду не підтверджено"
-                        self.task_records.append({
-                            "task_id": task_id,
-                            "title": title,
-                            "status": "COMPLETED",
-                            "coins": earned,
-                            "reason": status_reason
-                        })
-                        logger.info(f"[{self.account_name}] ✅ Завдання '{title}' успішно зараховано! (+{earned} 🪙)")
-                    else:
-                        self.tasks_failed += 1
-                        self.task_records.append({
-                            "task_id": task_id,
-                            "title": title,
-                            "status": "FAILED",
-                            "coins": 0,
-                            "reason": "Сервер не підтвердив завершення перегляду"
-                        })
+                        if target_url:
+                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {target_url}...")
+                            try:
+                                self.client.get(target_url)
+                            except Exception as e:
+                                logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
+                        else:
+                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': пасивне очікування ({stay_seconds} сек)...")
+
+                        # Реальна пауза для зарахування перегляду на сервері AliExpress
+                        self.client.sleep_random(stay_seconds + 0.2, stay_seconds + 1.5)
+
+                        # Фіксація завершення завдання
+                        complete_ok = self._complete_task(task)
+                        earned = task.get("earnedCoins", 0)
+
+                        # Клейм монет викликаємо лише якщо сервер не нарахував їх автоматично в process.complete
+                        coins_claimed = -1
+                        if complete_ok and earned <= 0:
+                            coins_claimed = self._claim_task_reward(task)
+                            if coins_claimed > 0:
+                                earned = coins_claimed
+
+                        if complete_ok or earned > 0 or coins_claimed >= 0:
+                            self.completed_tasks += 1
+                            self.tasks_completed += 1
+                            if earned > 0:
+                                self.task_coins_earned += earned
+                            status_reason = f"Успішно зараховано (+{earned} 🪙)" if earned > 0 else "Переглянуто та зараховано"
+                            self.task_records.append({
+                                "task_id": run_task_id,
+                                "title": f"{title}{run_label}",
+                                "status": "COMPLETED",
+                                "coins": earned,
+                                "reason": status_reason
+                            })
+                            logger.info(f"[{self.account_name}] ✅ Завдання '{title}'{run_label} успішно зараховано! (+{earned} 🪙)")
+                        else:
+                            self.tasks_failed += 1
+                            self.task_records.append({
+                                "task_id": run_task_id,
+                                "title": f"{title}{run_label}",
+                                "status": "FAILED",
+                                "coins": 0,
+                                "reason": "Сервер не підтвердив завершення перегляду"
+                            })
+                            logger.warning(f"[{self.account_name}] ⚠️ Не вдалося завершити завдання '{title}'{run_label}.")
+                            break
+
+                        # Перевіряємо, чи сервер повернув фініш завдання
+                        comp_res = task.get("completeResult", {})
+                        comp_data = comp_res.get("data", {}) if isinstance(comp_res, dict) and isinstance(comp_res.get("data"), dict) else {}
+                        server_status = comp_data.get("instanceStatus")
+                        server_joined = comp_data.get("timesJoined")
+                        server_limit = comp_data.get("timesLimit")
+
+                        if server_status == 2 or (server_joined is not None and server_limit is not None and server_joined >= server_limit):
+                            logger.info(f"[{self.account_name}] ℹ️ Завдання '{title}' завершило всі доступні повтори ({server_joined}/{server_limit}).")
+                            break
+
+                        if run_idx < target_runs:
+                            self.client.sleep_random(1.5, 3.0)
 
                 self.status = "SUCCESS"
                 return self.completed_tasks
@@ -858,11 +982,18 @@ class CoinsFarmManager:
             logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _complete_task ({task_id}): {res_str}")
             if res and isinstance(res, dict):
                 if _is_task_success(res):
+                    earned_coins = _extract_coins_from_complete_result(res, task)
+                    self.last_complete_coins = earned_coins
+                    self.last_complete_data = res.get("data") if isinstance(res.get("data"), dict) else {}
+                    task["earnedCoins"] = earned_coins
+                    task["completeResult"] = res
                     return True
                 logger.warning(f"[{self.account_name}] ⚠️ _complete_task для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
             logger.error(f"[{self.account_name}] ❌ Виняток під час _complete_task: {e}")
 
+        task["earnedCoins"] = 0
+        self.last_complete_coins = 0
         return False
 
     def _claim_task_reward(self, task: Dict[str, Any]) -> int:

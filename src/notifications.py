@@ -533,9 +533,14 @@ class NotificationDispatcher:
                     task_parts.append(f"{tasks_f_v} збій")
                 sub_lines.append(f"   🛍️ Таски: {', '.join(task_parts)}")
 
-                # Відображення деталей завдань (до 6 елементів)
+                # Відображення деталей завдань (до 10 елементів, пріоритет виконаних)
                 if s.task_details and isinstance(s.task_details, list):
-                    shown_tasks = s.task_details[:6]
+                    sorted_details = sorted(
+                        s.task_details,
+                        key=lambda x: 0 if isinstance(x, dict) and x.get("status") == "COMPLETED"
+                        else (1 if isinstance(x, dict) and x.get("status") == "FAILED" else 2)
+                    )
+                    shown_tasks = sorted_details[:10]
                     for t in shown_tasks:
                         if not isinstance(t, dict):
                             continue
@@ -553,8 +558,8 @@ class NotificationDispatcher:
                             sub_lines.append(f"     • ⏭️ <i>{t_title}</i> ({t_r})")
                         else:
                             sub_lines.append(f"     • ⚠️ <i>{t_title}</i> ({t_r})")
-                    if len(s.task_details) > len(shown_tasks):
-                        sub_lines.append(f"     • <i>...ще {len(s.task_details) - len(shown_tasks)} завдань</i>")
+                    if len(sorted_details) > len(shown_tasks):
+                        sub_lines.append(f"     • <i>...ще {len(sorted_details) - len(shown_tasks)} завдань</i>")
 
             # 4. Купони
             coupons_v = int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0
