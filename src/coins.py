@@ -81,20 +81,46 @@ def _is_task_success(data: Any) -> bool:
         return False
     if _is_task_already_done(data):
         return False
-    if data.get("success") is False:
+    if data.get("errorCode"):
         return False
     data_block = data.get("data")
-    if isinstance(data_block, dict) and data_block.get("success") is False:
-        return False
+    if isinstance(data_block, dict):
+        if data_block.get("errorCode"):
+            return False
+        if data_block.get("success") is False:
+            return False
+        res_in_data = data_block.get("result")
+        if isinstance(res_in_data, dict):
+            if res_in_data.get("errorCode"):
+                return False
+            if res_in_data.get("success") is False:
+                return False
     result_block = data.get("result")
-    if isinstance(result_block, dict) and result_block.get("success") is False:
+    if isinstance(result_block, dict):
+        if result_block.get("errorCode"):
+            return False
+        if result_block.get("success") is False:
+            return False
+    if data.get("success") is False:
         return False
     if data.get("success") is True or data.get("isSuccess") is True:
         return True
-    if isinstance(data_block, dict) and (data_block.get("success") is True or data_block.get("isSuccess") is True):
-        return True
-    if isinstance(result_block, dict) and (result_block.get("success") is True or result_block.get("isSuccess") is True):
-        return True
+    if isinstance(data_block, dict):
+        if data_block.get("success") is True or data_block.get("isSuccess") is True:
+            return True
+        if data_block.get("completeSuccess") is True:
+            return True
+        res_in_data = data_block.get("result")
+        if isinstance(res_in_data, dict):
+            if res_in_data.get("success") is True or res_in_data.get("isSuccess") is True:
+                return True
+            if res_in_data.get("completeSuccess") is True:
+                return True
+    if isinstance(result_block, dict):
+        if result_block.get("success") is True or result_block.get("isSuccess") is True:
+            return True
+        if result_block.get("completeSuccess") is True:
+            return True
     ret = data.get("ret")
     if isinstance(ret, list) and len(ret) > 0 and isinstance(ret[0], str):
         return ret[0].startswith("SUCCESS::") or ret[0] == "SUCCESS"
@@ -482,6 +508,31 @@ class CoinsFarmManager:
                         raw_issue_handle = mat.get("issueHandle") if mat.get("issueHandle") is not None else it.get("issueHandle", 0)
                         issue_handle = _clean_int(raw_issue_handle)
 
+                        raw_type = (
+                            mat.get("type")
+                            if mat.get("type") is not None
+                            else (
+                                it.get("type")
+                                if it.get("type") is not None
+                                else cfg.get("type")
+                            )
+                        )
+                        browse_zero_flag = bool(
+                            mat.get("browseZeroFlag")
+                            or it.get("browseZeroFlag")
+                            or cfg.get("browseZeroFlag")
+                        )
+                        task_tag_id = (
+                            cfg.get("taskTagId")
+                            or mat.get("taskTagId")
+                            or it.get("taskTagId")
+                        )
+                        component_type = (
+                            cfg.get("componentType")
+                            or mat.get("componentType")
+                            or it.get("componentType")
+                        )
+
                         normalized.append({
                             "taskId": task_id,
                             "taskInstanceId": task_id,
@@ -496,6 +547,10 @@ class CoinsFarmManager:
                             "timesJoined": times_joined,
                             "issueHandle": issue_handle,
                             "taskType": task_type,
+                            "rawType": raw_type,
+                            "browseZeroFlag": browse_zero_flag,
+                            "taskTagId": task_tag_id,
+                            "componentType": component_type,
                             "taskTitle": title,
                             "status": str(status).lower(),
                             "unIssueRecord": un_issue,
@@ -578,7 +633,7 @@ class CoinsFarmManager:
         """
         Жорсткий фільтр безпеки: повертає True для безпечних пасивних завдань
         (перегляд сторінок/товарів ~15 секунд або забирання вже готової нагороди).
-        Всі покупки, додавання в кошик, підписки чи зовнішні шери відхиляються.
+        Всі покупки, додавання в кошик, підписки чи зовнішні дії/міні-ігри відхиляються.
         """
         if not isinstance(task, dict):
             return False
@@ -599,6 +654,15 @@ class CoinsFarmManager:
         if times_limit > 0 and times_joined >= times_limit:
             if status not in ("waitforreceive", "wait_for_receive") and not task.get("unIssueRecord"):
                 return False
+
+        # Відсіюємо зовнішні дії та міні-ігри: taskTagId або raw_type == 30
+        cfg = task.get("behaviorConfig") if isinstance(task.get("behaviorConfig"), dict) else {}
+        task_tag_id = task.get("taskTagId") or cfg.get("taskTagId")
+        raw_type = task.get("rawType") if task.get("rawType") is not None else task.get("type")
+
+        if task_tag_id or str(raw_type) == "30" or _clean_int(raw_type) == 30:
+            logger.debug(f"[{self.account_name}] 🎮 Пропущено зовнішню дію / міні-гру (tag: {task_tag_id}, type: {raw_type}): {task.get('taskTitle')}")
+            return False
 
         # Об'єднуємо всі текстові поля для перевірки на заборонені дії
         text_repr = " ".join([
@@ -623,12 +687,22 @@ class CoinsFarmManager:
         if status in ("waitforreceive", "wait_for_receive") or bool(task.get("unIssueRecord")):
             return True
 
-        # Перевірка на безпечний тип завдання перегляду (включаючи Тип: 1 та Тип: 3)
-        raw_type = task.get("taskType")
-        if raw_type in SAFE_TASK_TYPES or str(raw_type).lower() in SAFE_TASK_TYPES:
+        # Справжні завдання перегляду: browseZeroFlag is True або raw_type == 0
+        browse_zero = bool(task.get("browseZeroFlag") or cfg.get("browseZeroFlag"))
+        if browse_zero:
             return True
 
-        # Перевірка за безпечними ключовими словами
+        if raw_type in (0, "0") or _clean_int(raw_type) == 0:
+            return True
+
+        task_type = task.get("taskType")
+        if task_type in (0, "0") or _clean_int(task_type) == 0:
+            return True
+
+        # Підтримка для legacy та тестових завдань (SAFE_TASK_TYPES: 1, 3, "browse", "search")
+        if task_type in SAFE_TASK_TYPES or str(task_type).lower() in SAFE_TASK_TYPES:
+            return True
+
         if any(safe_word in text_repr for safe_word in SAFE_KEYWORDS):
             return True
 
@@ -714,12 +788,22 @@ class CoinsFarmManager:
                     instance_status = t.get("instanceStatus")
                     times_limit = _clean_int(t.get("timesLimit", 1))
                     times_joined = _clean_int(t.get("timesJoined", 0))
-                    if instance_status is not None and _clean_int(instance_status) not in (0, None) and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
+
+                    cfg = t.get("behaviorConfig") if isinstance(t.get("behaviorConfig"), dict) else {}
+                    task_tag_id = t.get("taskTagId") or cfg.get("taskTagId")
+                    raw_type = t.get("rawType") if t.get("rawType") is not None else t.get("type")
+
+                    rec_status = "SKIPPED"
+
+                    if instance_status == 2 or _clean_int(instance_status) == 2 or t_status_str in ("completed", "finished", "done"):
+                        rec_status = "ALREADY_DONE"
+                        reason = "Вже виконано сьогодні раніше"
+                    elif task_tag_id or str(raw_type) == "30" or _clean_int(raw_type) == 30:
+                        reason = "Зовнішня дія / міні-гра"
+                    elif instance_status is not None and _clean_int(instance_status) not in (0, None) and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
                         reason = f"Неактивний статус (instanceStatus={instance_status})"
                     elif times_limit > 0 and times_joined >= times_limit and t_status_str not in ("waitforreceive", "wait_for_receive") and not t.get("unIssueRecord"):
                         reason = f"Всі спроби вичерпано ({times_joined}/{times_limit})"
-                    elif t_status_str in ("completed", "finished", "done"):
-                        reason = "Вже виконано раніше"
                     elif any(bw in text_repr for bw in UNSAFE_KEYWORDS):
                         reason = "Небезпечна дія (покупка/підписка/кошик)"
                     elif "daily check" in t_title.lower() and not t.get("actionUrl"):
@@ -729,7 +813,7 @@ class CoinsFarmManager:
                     self.task_records.append({
                         "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
                         "title": t_title,
-                        "status": "SKIPPED",
+                        "status": rec_status,
                         "coins": 0,
                         "reason": reason
                     })
@@ -815,14 +899,15 @@ class CoinsFarmManager:
                         complete_ok = self._complete_task(task)
                         earned = task.get("earnedCoins", 0)
 
-                        # Клейм монет викликаємо лише якщо сервер не нарахував їх автоматично в process.complete
+                        # Клейм монет викликаємо лише якщо complete_ok успішний і сервер не нарахував їх автоматично в process.complete.
+                        # При ILLEGAL_COMPLETION або неуспішному complete_ok клейм НІКОЛИ не викликається!
                         coins_claimed = -1
-                        if complete_ok and earned <= 0:
+                        if complete_ok and earned <= 0 and not task.get("illegalCompletion"):
                             coins_claimed = self._claim_task_reward(task)
                             if coins_claimed > 0:
                                 earned = coins_claimed
 
-                        if complete_ok or earned > 0 or coins_claimed >= 0:
+                        if complete_ok and (earned > 0 or coins_claimed >= 0 or task.get("completeSuccess")):
                             self.completed_tasks += 1
                             self.tasks_completed += 1
                             if earned > 0:
@@ -981,13 +1066,38 @@ class CoinsFarmManager:
                 res_str = str(res)
             logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _complete_task ({task_id}): {res_str}")
             if res and isinstance(res, dict):
-                if _is_task_success(res):
+                res_data = res.get("data") if isinstance(res.get("data"), dict) else {}
+                res_result = res_data.get("result") if isinstance(res_data.get("result"), dict) else {}
+
+                # Помилка, якщо в data або data.result (чи в корені) є errorCode
+                has_error = bool(
+                    res.get("errorCode")
+                    or res_data.get("errorCode")
+                    or res_result.get("errorCode")
+                )
+
+                # Завершення успішне ТІЛЬКИ якщо немає помилок і completeSuccess is True
+                complete_success = bool(
+                    res_result.get("completeSuccess") is True
+                    or res_data.get("completeSuccess") is True
+                    or (res_data.get("success") is True and not has_error)
+                    or (res_result.get("success") is True and not has_error)
+                )
+
+                if not has_error and complete_success and _is_task_success(res):
                     earned_coins = _extract_coins_from_complete_result(res, task)
                     self.last_complete_coins = earned_coins
-                    self.last_complete_data = res.get("data") if isinstance(res.get("data"), dict) else {}
+                    self.last_complete_data = res_data
                     task["earnedCoins"] = earned_coins
                     task["completeResult"] = res
+                    task["completeSuccess"] = True
                     return True
+
+                err_code = res_data.get("errorCode") or res_result.get("errorCode") or res.get("errorCode")
+                if err_code:
+                    task["errorCode"] = err_code
+                    if err_code == "ILLEGAL_COMPLETION":
+                        task["illegalCompletion"] = True
                 logger.warning(f"[{self.account_name}] ⚠️ _complete_task для {task_id} не підтверджено: {res.get('ret') or res}")
         except Exception as e:
             logger.error(f"[{self.account_name}] ❌ Виняток під час _complete_task: {e}")
@@ -1003,6 +1113,11 @@ class CoinsFarmManager:
         """
         task_id = task.get("taskInstanceId") or task.get("taskId")
         if not task_id:
+            return -1
+
+        # Ніколи не викликаємо claim при ILLEGAL_COMPLETION
+        if task.get("illegalCompletion") or task.get("errorCode") == "ILLEGAL_COMPLETION":
+            logger.warning(f"[{self.account_name}] 🚫 Пропуск _claim_task_reward для {task_id}: завдання має ILLEGAL_COMPLETION")
             return -1
 
         un_issue = task.get("unIssueRecord")
@@ -1046,7 +1161,14 @@ class CoinsFarmManager:
                 res_str = str(res)
             logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _claim_task_reward ({task_id}): {res_str}")
             if res and isinstance(res, dict):
-                if _is_task_success(res):
+                res_data = res.get("data") if isinstance(res.get("data"), dict) else {}
+                res_result = res_data.get("result") if isinstance(res_data.get("result"), dict) else {}
+                has_error = bool(
+                    res.get("errorCode")
+                    or res_data.get("errorCode")
+                    or res_result.get("errorCode")
+                )
+                if not has_error and _is_task_success(res):
                     coins = 0
                     for b in _collect_nested_dicts(res):
                         for k in ("coinCount", "awardCoins", "amount", "coins", "prizeAmount", "rewardCoinNum"):

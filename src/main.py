@@ -232,10 +232,15 @@ def main():
             sorted_td = sorted(
                 s.task_details,
                 key=lambda x: 0 if isinstance(x, dict) and x.get("status") == "COMPLETED"
-                else (1 if isinstance(x, dict) and x.get("status") == "FAILED" else 2)
+                else (1 if isinstance(x, dict) and x.get("status") in ("ALREADY_DONE", "DONE")
+                else (2 if isinstance(x, dict) and x.get("status") == "FAILED" else 3))
             )
             for td in sorted_td[:10]:
-                st_icon = "✅" if td.get("status") == "COMPLETED" else ("⏭️" if td.get("status") == "SKIPPED" else "❌")
+                st_icon = (
+                    "✅" if td.get("status") == "COMPLETED"
+                    else ("ℹ️" if td.get("status") in ("ALREADY_DONE", "DONE")
+                    else ("⏭️" if td.get("status") == "SKIPPED" else "❌"))
+                )
                 coins_s = f" (+{td.get('coins')} 🪙)" if td.get("coins", 0) > 0 else ""
                 reason_s = f" ({td.get('reason')})" if td.get("reason") else ""
                 logger.info(f"   │   {st_icon} {td.get('title')}{coins_s}{reason_s}")

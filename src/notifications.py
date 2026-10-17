@@ -347,6 +347,8 @@ class NotificationDispatcher:
                         t_st_raw = t.get("status", "COMPLETED")
                         if t_st_raw == "COMPLETED":
                             t_icon = "✅ Виконано"
+                        elif t_st_raw in ("ALREADY_DONE", "DONE"):
+                            t_icon = "ℹ️ Вже виконано"
                         elif t_st_raw == "SKIPPED":
                             t_icon = "⏭️ Пропущено"
                         else:
@@ -538,7 +540,8 @@ class NotificationDispatcher:
                     sorted_details = sorted(
                         s.task_details,
                         key=lambda x: 0 if isinstance(x, dict) and x.get("status") == "COMPLETED"
-                        else (1 if isinstance(x, dict) and x.get("status") == "FAILED" else 2)
+                        else (1 if isinstance(x, dict) and x.get("status") in ("ALREADY_DONE", "DONE")
+                        else (2 if isinstance(x, dict) and x.get("status") == "FAILED" else 3))
                     )
                     shown_tasks = sorted_details[:10]
                     for t in shown_tasks:
@@ -554,6 +557,8 @@ class NotificationDispatcher:
                             else:
                                 t_note = f" ({t_r})" if t_r and t_r != "-" else ""
                                 sub_lines.append(f"     • ✅ <i>{t_title}</i>{t_note}")
+                        elif t_st in ("ALREADY_DONE", "DONE"):
+                            sub_lines.append(f"     • ℹ️ <i>{t_title}</i> ({t_r})")
                         elif t_st == "SKIPPED":
                             sub_lines.append(f"     • ⏭️ <i>{t_title}</i> ({t_r})")
                         else:

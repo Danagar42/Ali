@@ -4758,6 +4758,265 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             self.assertEqual(summary_arg.coins_earned, 75)
             self.assertEqual(summary_arg.tasks_coins, 45)
 
+    def test_is_task_success_and_complete_task_reject_illegal_completion(self):
+        """Перевіряє, що ILLEGAL_COMPLETION відхиляється як неуспішне і не викликає claim."""
+        from src.coins import _is_task_success
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        illegal_res = {
+            "api": "mtop.aliexpress.interactive.task.process.complete",
+            "data": {
+                "errorCode": "ILLEGAL_COMPLETION",
+                "errorMsg": "system error,code is :E0-0-1",
+                "result": {
+                    "errorCode": "ILLEGAL_COMPLETION",
+                    "errorMsg": "system error,code is :E0-0-1"
+                }
+            },
+            "ret": ["SUCCESS::调用成功"]
+        }
+        # 1. _is_task_success обов'язково повертає False
+        self.assertFalse(_is_task_success(illegal_res))
+
+        # 2. _complete_task повертає False та позначає illegalCompletion
+        task = {
+            "taskInstanceId": "inst_game_123",
+            "taskTitle": "Items at $0.1 to get",
+            "taskType": 3,
+            "status": "todo"
+        }
+        with patch.object(checkin_mgr, "_call_mtop", return_value=illegal_res):
+            ok = coins_mgr._complete_task(task)
+            self.assertFalse(ok)
+            self.assertEqual(task.get("earnedCoins"), 0)
+            self.assertTrue(task.get("illegalCompletion"))
+            self.assertEqual(task.get("errorCode"), "ILLEGAL_COMPLETION")
+
+        # 3. Прямий виклик _claim_task_reward не надсилає запит, а одразу повертає -1
+        with patch.object(checkin_mgr, "_call_mtop") as mock_mtop_claim:
+            claimed = coins_mgr._claim_task_reward(task)
+            self.assertEqual(claimed, -1)
+            mock_mtop_claim.assert_not_called()
+
+    def test_farm_browse_tasks_illegal_completion_never_calls_claim_and_fails_safely(self):
+        """При отриманні ILLEGAL_COMPLETION у farm_browse_tasks клейм ніколи не викликається."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        game_task = {
+            "taskInstanceId": "inst_game_fail",
+            "taskTitle": "GoGo Match",
+            "taskType": 1,
+            "status": "todo",
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "staySeconds": 1,
+            "actionUrl": "https://aliexpress.com/game"
+        }
+        illegal_res = {
+            "api": "mtop.aliexpress.interactive.task.process.complete",
+            "data": {
+                "errorCode": "ILLEGAL_COMPLETION",
+                "result": {"errorCode": "ILLEGAL_COMPLETION"}
+            },
+            "ret": ["SUCCESS::调用成功"]
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=[game_task]), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=illegal_res), \
+             patch.object(coins_mgr, "_claim_task_reward") as mock_claim:
+
+            done = coins_mgr.farm_browse_tasks(count=1)
+            self.assertEqual(done, 0)
+            self.assertEqual(coins_mgr.tasks_failed, 1)
+            self.assertEqual(coins_mgr.tasks_completed, 0)
+            mock_claim.assert_not_called()
+            self.assertEqual(len(coins_mgr.task_records), 1)
+            self.assertEqual(coins_mgr.task_records[0]["status"], "FAILED")
+            self.assertEqual(coins_mgr.task_records[0]["coins"], 0)
+
+    def test_is_safe_task_rejects_mini_games_with_task_tag_id_or_type_30(self):
+        """Перевіряє фільтрацію зовнішніх міні-ігор (taskTagId або rawType=30) та instanceStatus=2."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        coins_mgr = CoinsFarmManager(client)
+
+        # 1. Полив Prize Land (taskTagId: watering2.0)
+        task_prize_land = {
+            "taskTitle": "Items at $0.1 to get",
+            "taskTagId": "watering2.0",
+            "behaviorConfig": {"taskTagId": "watering2.0"},
+            "rawType": 30,
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(task_prize_land))
+
+        # 2. GoGo Match (taskTagId: GOGOMATCH_WIN_GAME)
+        task_gogo = {
+            "taskTitle": "Complete 1 level of the GoGo Match game",
+            "behaviorConfig": {"taskTagId": "GOGOMATCH_WIN_GAME"},
+            "rawType": 30,
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(task_gogo))
+
+        # 3. Daily quiz (taskTagId: coinsQuestionTask)
+        task_quiz = {
+            "taskTitle": "Daily quiz challenge",
+            "behaviorConfig": {"taskTagId": "coinsQuestionTask"},
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(task_quiz))
+
+        # 4. Write reviews (taskTagId: Review_Finish)
+        task_reviews = {
+            "taskTitle": "Write reviews",
+            "behaviorConfig": {"taskTagId": "Review_Finish"},
+            "instanceStatus": 0,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(task_reviews))
+
+        # 5. Вже виконане сьогодні раніше завдання (instanceStatus = 2)
+        task_already_done = {
+            "taskTitle": "Browse recently viewed items",
+            "browseZeroFlag": True,
+            "instanceStatus": 2,
+            "status": "todo"
+        }
+        self.assertFalse(coins_mgr.is_safe_task(task_already_done))
+
+        # 6. Справжнє завдання перегляду з browseZeroFlag = True
+        task_real_browse = {
+            "taskTitle": "Explore sponsored items",
+            "browseZeroFlag": True,
+            "instanceStatus": 0,
+            "status": "todo",
+            "actionUrl": "https://m.aliexpress.com/recommends"
+        }
+        self.assertTrue(coins_mgr.is_safe_task(task_real_browse))
+
+    def test_farm_browse_tasks_skips_mini_games_and_records_already_done_accurately(self):
+        """Перевіряє коректне маркування пропущених ігор та вже виконаних завдань у task_records."""
+        client = AliClient(cookies={"_m_h5_tk": "tk123"})
+        checkin_mgr = CheckinManager(client)
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        sample_tasks = [
+            # 1. Гра 1
+            {
+                "taskId": "game_1",
+                "taskTitle": "Items at $0.1 to get",
+                "taskTagId": "watering2.0",
+                "behaviorConfig": {"taskTagId": "watering2.0"},
+                "instanceStatus": 0,
+                "status": "todo"
+            },
+            # 2. Гра 2
+            {
+                "taskId": "game_2",
+                "taskTitle": "GoGo Match game",
+                "behaviorConfig": {"taskTagId": "GOGOMATCH_WIN_GAME"},
+                "rawType": 30,
+                "instanceStatus": 0,
+                "status": "todo"
+            },
+            # 3. Вже виконане раніше (instanceStatus = 2)
+            {
+                "taskId": "done_1",
+                "taskTitle": "Browse recently viewed items",
+                "browseZeroFlag": True,
+                "instanceStatus": 2,
+                "status": "todo"
+            },
+            # 4. Реальне завдання перегляду
+            {
+                "taskId": "browse_ok",
+                "taskTitle": "Explore sponsored items",
+                "browseZeroFlag": True,
+                "instanceStatus": 0,
+                "status": "todo",
+                "timesLimit": 1,
+                "timesJoined": 0,
+                "staySeconds": 15,
+                "actionUrl": "https://m.aliexpress.com/browse"
+            }
+        ]
+        complete_res = {
+            "ret": ["SUCCESS::调用成功"],
+            "data": {
+                "result": {
+                    "completeSuccess": True,
+                    "instanceStatus": 2,
+                    "interestIssueResultMap": {
+                        "reward_1": {
+                            "interestNum": 5,
+                            "issueHandleResult": True
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(coins_mgr, "fetch_active_tasks", return_value=sample_tasks), \
+             patch.object(client, "get"), \
+             patch.object(client, "sleep_random"), \
+             patch.object(checkin_mgr, "_call_mtop", return_value=complete_res):
+
+            done = coins_mgr.farm_browse_tasks(count=5)
+            self.assertEqual(done, 1)
+            self.assertEqual(coins_mgr.tasks_completed, 1)
+            self.assertEqual(coins_mgr.tasks_skipped, 3)
+            self.assertEqual(coins_mgr.tasks_failed, 0)
+            self.assertEqual(coins_mgr.task_coins_earned, 5)
+
+            # Перевіряємо статус та причину для кожного запису
+            records_by_title = {r["title"]: r for r in coins_mgr.task_records}
+            self.assertEqual(records_by_title["Items at $0.1 to get"]["status"], "SKIPPED")
+            self.assertEqual(records_by_title["Items at $0.1 to get"]["reason"], "Зовнішня дія / міні-гра")
+
+            self.assertEqual(records_by_title["GoGo Match game"]["status"], "SKIPPED")
+            self.assertEqual(records_by_title["GoGo Match game"]["reason"], "Зовнішня дія / міні-гра")
+
+            self.assertEqual(records_by_title["Browse recently viewed items"]["status"], "ALREADY_DONE")
+            self.assertIn("Вже виконано сьогодні раніше", records_by_title["Browse recently viewed items"]["reason"])
+
+            self.assertEqual(records_by_title["Explore sponsored items"]["status"], "COMPLETED")
+            self.assertEqual(records_by_title["Explore sponsored items"]["coins"], 5)
+
+    def test_notifications_display_already_done_tasks(self):
+        """Перевіряє, що GITHUB_STEP_SUMMARY відображає іконку ℹ️ Вже виконано для ALREADY_DONE."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        import tempfile
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Test_Account",
+            checkin_status="SUCCESS",
+            session_valid=True,
+            task_details=[
+                {"task_id": "T1", "title": "Recap", "status": "ALREADY_DONE", "coins": 0, "reason": "Вже виконано сьогодні раніше"},
+                {"task_id": "T2", "title": "Mini Game", "status": "SKIPPED", "coins": 0, "reason": "Зовнішня дія / міні-гра"},
+                {"task_id": "T3", "title": "Browse Deals", "status": "COMPLETED", "coins": 5, "reason": "Успішно зараховано (+5 🪙)"}
+            ]
+        ))
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
+            temp_path = tf.name
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": temp_path}):
+                summary_md = dispatcher.generate_step_summary()
+                self.assertIn("ℹ️ Вже виконано", summary_md)
+                self.assertIn("⏭️ Пропущено", summary_md)
+                self.assertIn("✅ Виконано", summary_md)
+                self.assertIn("Зовнішня дія / міні-гра", summary_md)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
