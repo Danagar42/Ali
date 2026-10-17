@@ -706,14 +706,11 @@ class CoinsFarmManager:
 
         # Справжні завдання перегляду: browseZeroFlag is True або raw_type == 0
         browse_zero = bool(task.get("browseZeroFlag") or cfg.get("browseZeroFlag"))
-        if browse_zero or (raw_type is not None and _clean_int(raw_type) == 0):
+        if browse_zero or raw_type in (0, "0") or (raw_type is not None and str(raw_type).strip() == "0"):
             return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
 
         task_type = task.get("taskType")
-        if task_type in (0, "0") or _clean_int(task_type) == 0:
-            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
-
-        if task_type in SAFE_TASK_TYPES or str(task_type).lower() in SAFE_TASK_TYPES:
+        if task_type in SAFE_TASK_TYPES or (task_type is not None and str(task_type).strip().lower() in SAFE_TASK_TYPES):
             return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
 
         text_repr_lower = text_repr.lower()

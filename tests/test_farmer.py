@@ -5259,9 +5259,50 @@ class TestCoinsFarmManagerRefinements(unittest.TestCase):
             self.assertEqual(coins_mgr.task_records[2]["status"], "SKIPPED")
             self.assertEqual(coins_mgr.task_records[2]["reason"], "Перевищено ліміт завдань на сесію")
 
+    def test_classify_task_non_numeric_task_type_and_raw_type_not_treated_as_zero(self):
+        """Перевіряє, що нечислові значення taskType або rawType (наприклад 'quiz', 'custom_action') не вважаються 0."""
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        task_non_numeric = {
+            "taskId": "t_custom",
+            "taskTitle": "Some Random Action",
+            "taskType": "custom_action",
+            "rawType": "special",
+            "actionUrl": "https://aliexpress.com/custom",
+            "status": "todo"
+        }
+        is_safe, category, reason = mgr.classify_task(task_non_numeric)
+        self.assertFalse(is_safe)
+        self.assertEqual(category, "SKIPPED")
+        self.assertIn("непідтримуваний тип", reason)
+
+        task_safe_zero = {
+            "taskId": "t_safe_0",
+            "taskTitle": "Daily activity",
+            "taskType": 0,
+            "actionUrl": "https://aliexpress.com/browse",
+            "status": "todo"
+        }
+        is_safe, category, reason = mgr.classify_task(task_safe_zero)
+        self.assertTrue(is_safe)
+        self.assertEqual(category, "SAFE_BROWSE")
+
+        task_safe_raw_zero = {
+            "taskId": "t_safe_raw_0",
+            "taskTitle": "Daily activity",
+            "rawType": "0",
+            "actionUrl": "https://aliexpress.com/browse",
+            "status": "todo"
+        }
+        is_safe, category, reason = mgr.classify_task(task_safe_raw_zero)
+        self.assertTrue(is_safe)
+        self.assertEqual(category, "SAFE_BROWSE")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
