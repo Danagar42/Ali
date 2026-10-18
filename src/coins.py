@@ -243,6 +243,7 @@ class CoinsFarmManager:
         self.error_message: Optional[str] = None
         self.working_platform: str = TASK_PLATFORM
         self.tasks_completed: int = 0
+        self.tasks_already_done: int = 0
         self.tasks_skipped: int = 0
         self.tasks_failed: int = 0
         self.task_records: List[Dict[str, Any]] = []
@@ -797,6 +798,8 @@ class CoinsFarmManager:
                 if is_safe:
                     safe_tasks.append(t)
                 else:
+                    if rec_status in ("ALREADY_DONE", "DONE"):
+                        self.tasks_already_done += 1
                     self.tasks_skipped += 1
                     t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
                     self.task_records.append({

@@ -135,7 +135,12 @@ def main():
             init_c = getattr(checkin_mgr, "initial_coins", None)
             initial_balance = int(init_c) if isinstance(init_c, (int, float)) else None
             if initial_balance is None and account_total_coins is not None:
-                initial_balance = max(0, account_total_coins - total_earned_today)
+                session_earned = int(task_coins)
+                if getattr(checkin_mgr, "pc_status", None) == "SUCCESS":
+                    session_earned += int(getattr(checkin_mgr, "pc_coins", 0))
+                if getattr(checkin_mgr, "mobile_status", None) == "SUCCESS":
+                    session_earned += int(getattr(checkin_mgr, "mobile_coins", 0))
+                initial_balance = max(0, account_total_coins - session_earned)
 
             pc_coins_earned = int(getattr(checkin_mgr, "pc_coins", 0)) if isinstance(getattr(checkin_mgr, "pc_coins", 0), (int, float)) else 0
             mobile_coins_earned = int(getattr(checkin_mgr, "mobile_coins", 0)) if isinstance(getattr(checkin_mgr, "mobile_coins", 0), (int, float)) else 0
@@ -150,6 +155,9 @@ def main():
             task_records = getattr(coins_mgr, "task_records", [])
             if not isinstance(task_records, list):
                 task_records = []
+            tasks_already_done = int(getattr(coins_mgr, "tasks_already_done", 0)) if isinstance(getattr(coins_mgr, "tasks_already_done", 0), (int, float)) else 0
+            if tasks_already_done == 0 and task_records:
+                tasks_already_done = sum(1 for t in task_records if isinstance(t, dict) and t.get("status") in ("ALREADY_DONE", "DONE"))
             coupon_records = getattr(coupon_mgr, "coupon_records", [])
             if not isinstance(coupon_records, list):
                 coupon_records = []
@@ -173,6 +181,7 @@ def main():
                 mobile_streak=int(getattr(checkin_mgr, "mobile_streak", 0)) if isinstance(getattr(checkin_mgr, "mobile_streak", 0), (int, float)) else 0,
                 checkin_coins=earned_from_checkin,
                 tasks_coins=int(task_coins),
+                tasks_already_done=tasks_already_done,
                 tasks_skipped=tasks_skipped,
                 tasks_failed=tasks_failed,
                 task_details=task_records,

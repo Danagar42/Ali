@@ -5300,8 +5300,140 @@ class TestCoinsFarmManagerRefinements(unittest.TestCase):
         self.assertEqual(category, "SAFE_BROWSE")
 
 
+class TestTelegramNotificationRefinements(unittest.TestCase):
+    def test_grouping_multi_run_completed_tasks_in_telegram_report(self):
+        """Перевіряє групування виконаних раундів завдань (наприклад 1/3, 2/3, 3/3) в один рядок (×3)."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        task_records = [
+            {"title": "View Super discounts (1/3)", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "View Super discounts (2/3)", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "View Super discounts (3/3)", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "Explore sponsored items (1/2)", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "Explore sponsored items (2/2)", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "Browse Coins deals", "status": "COMPLETED", "coins": 5, "reason": "Зараховано"},
+            {"title": "GoGo Match game", "status": "SKIPPED", "coins": 0, "reason": "Зовнішня дія / міні-гра"}
+        ]
+
+        dispatcher.add_summary(AccountSummary(
+            name="MultiRun_Account",
+            checkin_status="SUCCESS",
+            coins_earned=30,
+            tasks_done=6,
+            tasks_coins=30,
+            task_details=task_records
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            ok = dispatcher.send_telegram_notification()
+            self.assertTrue(ok)
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            # Перевіряємо компактне групування
+            self.assertIn("• ✅ <i>View Super discounts (×3)</i> (+15 🪙)", call_text)
+            self.assertIn("• ✅ <i>Explore sponsored items (×2)</i> (+10 🪙)", call_text)
+            self.assertIn("• ✅ <i>Browse Coins deals</i> (+5 🪙)", call_text)
+            self.assertNotIn("View Super discounts (1/3)", call_text)
+
+    def test_separating_already_done_from_skipped_in_task_summary(self):
+        """Перевіряє виведення 'X вже вик.' окремо від 'Y пропущ.' у рядку 🛍️ Таски."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        task_records = [
+            {"title": "Browse Deals", "status": "COMPLETED", "coins": 5},
+            {"title": "View Item 1", "status": "ALREADY_DONE", "coins": 0, "reason": "Вже виконано сьогодні"},
+            {"title": "View Item 2", "status": "ALREADY_DONE", "coins": 0, "reason": "Вже виконано сьогодні"},
+            {"title": "Quiz Game", "status": "SKIPPED", "coins": 0, "reason": "Зовнішня дія"}
+        ]
+
+        dispatcher.add_summary(AccountSummary(
+            name="Account_AD",
+            checkin_status="SUCCESS",
+            coins_earned=5,
+            tasks_done=1,
+            tasks_coins=5,
+            task_details=task_records
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            # Перевіряємо відокремлення
+            self.assertIn("🛍️ Таски: <b>1</b> вик. (+5 🪙), 2 вже вик., 1 пропущ.", call_text)
+
+    def test_balance_change_honest_display_when_diff_differs_from_daily_earned(self):
+        """Перевіряє відображення '(за запуск: +X, за день: +Y)' при повторному запуску за день."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        # За запуск додалося 25 (539 -> 564), а за день загалом 55 (30 чекін раніше + 25 таски)
+        dispatcher.add_summary(AccountSummary(
+            name="Repeat_Run_Account",
+            checkin_status="ALREADY_DONE",
+            coins_earned=55,
+            initial_coins=539,
+            total_coins=564,
+            tasks_done=5,
+            tasks_coins=25
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            expected_snippet = "💰 Баланс: <code>539</code> ➔ <b>564 🪙</b> (за запуск: <b>+25</b>, за день: <b>+55</b>)"
+            self.assertIn(expected_snippet, call_text)
+
+    def test_coupon_priorities_not_masking_failed_status(self):
+        """Перевіряє, що статус FAILED купонів не приховується, якщо інший купон має статус ALREADY_DONE."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        dispatcher.add_summary(AccountSummary(
+            name="Coupon_Mix_Account",
+            checkin_status="SUCCESS",
+            coupons_claimed=0,
+            coupon_details=[
+                {"id": "c_pc", "status": "ALREADY_DONE", "reason": "Вже зібрано"},
+                {"id": "c_mob", "status": "FAILED", "reason": "Мережевий збій (500)"}
+            ]
+        ))
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            self.assertIn("⚠️ Не отримано (Мережевий збій (500))", call_text)
+            self.assertNotIn("Всі доступні купони вже отримано", call_text)
+
+    def test_safe_truncate_html_cleans_empty_paired_tags(self):
+        """Перевіряє, що _safe_truncate_html очищує порожні парні теги типу <b></b> на межі скорочення."""
+        from src.notifications import _safe_truncate_html
+        raw = "<b>Header</b>\n" + "<b>Very long text " * 30 + "</b>"
+        truncated = _safe_truncate_html(raw, max_length=120)
+        self.assertNotIn("<b></b>", truncated)
+        self.assertNotIn("<i></i>", truncated)
+        self.assertLessEqual(len(truncated), 120)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

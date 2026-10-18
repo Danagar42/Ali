@@ -1708,7 +1708,12 @@ class CheckinManager:
         self._fetch_coin_balance()
         if self.total_coins is not None:
             self.final_coins = self.total_coins
-            self.initial_coins = max(0, self.total_coins - self.coins_earned)
+            fresh_checkin_coins = 0
+            if pc_status == "SUCCESS":
+                fresh_checkin_coins += pc_coins
+            if mobile_status == "SUCCESS":
+                fresh_checkin_coins += mobile_coins
+            self.initial_coins = max(0, self.total_coins - fresh_checkin_coins)
 
         return self.status in ("SUCCESS", "ALREADY_DONE")
 

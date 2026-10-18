@@ -100,7 +100,16 @@ def _safe_truncate_html(text: str, max_length: int = 4000) -> str:
             break
         truncated = truncated[:-excess]
 
-    return truncated + close_tags + suffix
+    res = truncated + close_tags + suffix
+    # Очищуємо порожні парні теги типу <b></b>, <i></i>, <code></code> на межі обрізання
+    empty_tag_pattern = re.compile(r"<([a-zA-Z0-9]+)(?:\s+[^>]*)?>\s*</\1>")
+    while True:
+        cleaned, n = empty_tag_pattern.subn("", res)
+        if n == 0:
+            break
+        res = cleaned
+
+    return res
 
 
 @dataclass
@@ -124,6 +133,7 @@ class AccountSummary:
     mobile_streak: int = 0
     checkin_coins: int = 0
     tasks_coins: int = 0
+    tasks_already_done: int = 0
     tasks_skipped: int = 0
     tasks_failed: int = 0
     task_details: List[Dict[str, Any]] = field(default_factory=list)
@@ -134,6 +144,11 @@ class AccountSummary:
         if self.initial_coins is None and isinstance(self.total_coins, (int, float)):
             earned = int(self.coins_earned) if isinstance(self.coins_earned, (int, float)) else 0
             self.initial_coins = max(0, int(self.total_coins) - earned)
+        if self.tasks_already_done == 0 and self.task_details:
+            self.tasks_already_done = sum(
+                1 for t in self.task_details
+                if isinstance(t, dict) and t.get("status") in ("ALREADY_DONE", "DONE")
+            )
         if self.checkin_coins == 0:
             pc_c = int(self.pc_coins) if isinstance(self.pc_coins, (int, float)) else 0
             mob_c = int(self.mobile_coins) if isinstance(self.mobile_coins, (int, float)) else 0
@@ -262,8 +277,15 @@ class NotificationDispatcher:
             earned_val = int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0
             earned_str = f"+{earned_val} 🪙" if earned_val > 0 else "0"
             if s.total_coins is not None:
-                if s.initial_coins is not None and earned_val > 0:
-                    total_str = f"{_format_coins(s.initial_coins)} ➔ {_format_coins(s.total_coins)} 🪙"
+                if s.initial_coins is not None:
+                    actual_diff = int(s.total_coins) - int(s.initial_coins)
+                    diff_s = f"+{actual_diff}" if actual_diff > 0 else str(actual_diff)
+                    if actual_diff != earned_val:
+                        total_str = f"{_format_coins(s.initial_coins)} ➔ {_format_coins(s.total_coins)} 🪙 ({diff_s})"
+                    elif earned_val > 0 or actual_diff != 0:
+                        total_str = f"{_format_coins(s.initial_coins)} ➔ {_format_coins(s.total_coins)} 🪙"
+                    else:
+                        total_str = f"{_format_coins(s.total_coins)} 🪙"
                 else:
                     total_str = f"{_format_coins(s.total_coins)} 🪙"
             else:
@@ -496,8 +518,22 @@ class NotificationDispatcher:
 
             # 1. Початковий та фінальний баланс монет
             if s.total_coins is not None:
-                if s.initial_coins is not None and earned_v > 0:
-                    sub_lines.append(f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> (<b>+{earned_v}</b>)")
+                if s.initial_coins is not None:
+                    actual_diff = int(s.total_coins) - int(s.initial_coins)
+                    diff_str = f"+{actual_diff}" if actual_diff > 0 else str(actual_diff)
+                    day_str = f"+{earned_v}" if earned_v > 0 else str(earned_v)
+                    if actual_diff != earned_v:
+                        sub_lines.append(
+                            f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
+                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>)"
+                        )
+                    elif earned_v > 0 or actual_diff != 0:
+                        sub_lines.append(
+                            f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
+                            f"(<b>{diff_str}</b>)"
+                        )
+                    else:
+                        sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>")
                 else:
                     sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>")
             elif earned_v > 0:
@@ -525,10 +561,26 @@ class NotificationDispatcher:
             tasks_c_v = int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0
             tasks_sk_v = int(s.tasks_skipped) if isinstance(s.tasks_skipped, (int, float)) else 0
             tasks_f_v = int(s.tasks_failed) if isinstance(s.tasks_failed, (int, float)) else 0
-            if tasks_v > 0 or tasks_c_v > 0 or tasks_sk_v > 0 or tasks_f_v > 0 or s.task_details:
+
+            tasks_already_done = int(s.tasks_already_done) if isinstance(s.tasks_already_done, (int, float)) else 0
+            if s.task_details and isinstance(s.task_details, list):
+                tasks_already_done = sum(
+                    1 for t in s.task_details
+                    if isinstance(t, dict) and t.get("status") in ("ALREADY_DONE", "DONE")
+                )
+                tasks_sk_v = sum(
+                    1 for t in s.task_details
+                    if isinstance(t, dict) and t.get("status") == "SKIPPED"
+                )
+            elif tasks_already_done > 0:
+                tasks_sk_v = max(0, tasks_sk_v - tasks_already_done)
+
+            if tasks_v > 0 or tasks_c_v > 0 or tasks_already_done > 0 or tasks_sk_v > 0 or tasks_f_v > 0 or s.task_details:
                 task_parts = [f"<b>{tasks_v}</b> вик."]
                 if tasks_c_v > 0:
                     task_parts[0] += f" (+{tasks_c_v} 🪙)"
+                if tasks_already_done > 0:
+                    task_parts.append(f"{tasks_already_done} вже вик.")
                 if tasks_sk_v > 0:
                     task_parts.append(f"{tasks_sk_v} пропущ.")
                 if tasks_f_v > 0:
@@ -537,8 +589,47 @@ class NotificationDispatcher:
 
                 # Відображення деталей завдань (до 10 елементів, пріоритет виконаних)
                 if s.task_details and isinstance(s.task_details, list):
+                    # Групуємо багаторазові виконані таски (timesLimit > 1) за базовою назвою
+                    completed_grouped: Dict[str, Dict[str, Any]] = {}
+                    other_tasks: List[Dict[str, Any]] = []
+
+                    for t in s.task_details:
+                        if not isinstance(t, dict):
+                            continue
+                        t_st = t.get("status")
+                        if t_st == "COMPLETED":
+                            raw_title = str(t.get("title") or t.get("task_id") or "Завдання")
+                            base_title = re.sub(r"\s*\(\d+/\d+\)$", "", raw_title).strip()
+                            c_val = t.get("coins", 0)
+                            c_int = int(c_val) if isinstance(c_val, (int, float)) else 0
+                            if base_title not in completed_grouped:
+                                completed_grouped[base_title] = {
+                                    "title": base_title,
+                                    "status": "COMPLETED",
+                                    "count": 1,
+                                    "coins": c_int,
+                                    "reason": t.get("reason", "")
+                                }
+                            else:
+                                completed_grouped[base_title]["count"] += 1
+                                completed_grouped[base_title]["coins"] += c_int
+                        else:
+                            other_tasks.append(t)
+
+                    processed_tasks: List[Dict[str, Any]] = []
+                    for base_title, grp in completed_grouped.items():
+                        cnt = grp["count"]
+                        disp_title = f"{base_title} (×{cnt})" if cnt > 1 else base_title
+                        processed_tasks.append({
+                            "title": disp_title,
+                            "status": "COMPLETED",
+                            "coins": grp["coins"],
+                            "reason": grp["reason"]
+                        })
+                    processed_tasks.extend(other_tasks)
+
                     sorted_details = sorted(
-                        s.task_details,
+                        processed_tasks,
                         key=lambda x: 0 if isinstance(x, dict) and x.get("status") == "COMPLETED"
                         else (1 if isinstance(x, dict) and x.get("status") in ("ALREADY_DONE", "DONE")
                         else (2 if isinstance(x, dict) and x.get("status") == "FAILED" else 3))
@@ -576,14 +667,17 @@ class NotificationDispatcher:
                             c_name = html.escape(str(c.get("id", "Купон")))
                             sub_lines.append(f"     • 🎟️ <i>{c_name}</i> (✅ отримано)")
             elif s.coupon_details and isinstance(s.coupon_details, list):
-                if any(c.get("status") == "ALREADY_DONE" for c in s.coupon_details if isinstance(c, dict)):
-                    sub_lines.append("   🎟️ Купони: ℹ️ Всі доступні купони вже отримано")
-                elif any(c.get("status") == "SKIPPED" for c in s.coupon_details if isinstance(c, dict)):
-                    sk_reason = next((c.get("reason") for c in s.coupon_details if isinstance(c, dict) and c.get("reason")), "Пропущено")
-                    sub_lines.append(f"   🎟️ Купони: ⏭️ Пропущено ({html.escape(str(sk_reason))})")
-                elif any(c.get("status") == "FAILED" for c in s.coupon_details if isinstance(c, dict)):
-                    f_reason = next((c.get("reason") for c in s.coupon_details if isinstance(c, dict) and c.get("reason")), "Збій")
+                valid_coupons = [c for c in s.coupon_details if isinstance(c, dict)]
+                if any(c.get("status") == "FAILED" for c in valid_coupons):
+                    f_reason = next((c.get("reason") for c in valid_coupons if c.get("status") == "FAILED" and c.get("reason")), "Збій")
                     sub_lines.append(f"   🎟️ Купони: ⚠️ Не отримано ({html.escape(str(f_reason))})")
+                elif valid_coupons and all(c.get("status") == "ALREADY_DONE" for c in valid_coupons):
+                    sub_lines.append("   🎟️ Купони: ℹ️ Всі доступні купони вже отримано")
+                elif any(c.get("status") == "ALREADY_DONE" for c in valid_coupons):
+                    sub_lines.append("   🎟️ Купони: ℹ️ Доступні купони вже отримано раніше")
+                elif any(c.get("status") == "SKIPPED" for c in valid_coupons):
+                    sk_reason = next((c.get("reason") for c in valid_coupons if c.get("reason")), "Пропущено")
+                    sub_lines.append(f"   🎟️ Купони: ⏭️ Пропущено ({html.escape(str(sk_reason))})")
 
             if sub_lines:
                 msg_lines.extend(sub_lines)
