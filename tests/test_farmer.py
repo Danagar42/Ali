@@ -4015,7 +4015,7 @@ class TestDetailedFarmerReporting(unittest.TestCase):
 
         with patch("requests.post") as mock_post:
             mock_post.return_value.status_code = 200
-            res = dispatcher.send_telegram_notification()
+            res = dispatcher.send_telegram_notification(detailed=True)
             self.assertTrue(res)
             mock_post.assert_called_once()
             call_text = mock_post.call_args[1]["json"]["text"]
@@ -4376,7 +4376,7 @@ class TestDetailedFarmerReporting(unittest.TestCase):
 
         with patch("requests.post") as mock_post:
             mock_post.return_value.status_code = 200
-            dispatcher.send_telegram_notification()
+            dispatcher.send_telegram_notification(detailed=True)
             sent_text = mock_post.call_args[1]["json"]["text"]
             self.assertIn("🎟️ Купони: ℹ️ Всі доступні купони вже отримано", sent_text)
 
@@ -5329,7 +5329,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
 
         with patch("requests.post") as mock_post:
             mock_post.return_value.status_code = 200
-            ok = dispatcher.send_telegram_notification()
+            ok = dispatcher.send_telegram_notification(detailed=True)
             self.assertTrue(ok)
             call_text = mock_post.call_args[1]["json"]["text"]
 
@@ -5415,7 +5415,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
 
         with patch("requests.post") as mock_post:
             mock_post.return_value.status_code = 200
-            dispatcher.send_telegram_notification()
+            dispatcher.send_telegram_notification(detailed=True)
             call_text = mock_post.call_args[1]["json"]["text"]
 
             self.assertIn("⚠️ Не отримано (Мережевий збій (500))", call_text)
@@ -5429,6 +5429,101 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
         self.assertNotIn("<b></b>", truncated)
         self.assertNotIn("<i></i>", truncated)
         self.assertLessEqual(len(truncated), 120)
+
+    def test_telegram_concise_mode_default_omits_bullet_points_and_includes_fiat(self):
+        """Перевіряє, що за замовчуванням звіт у Telegram стислий (без переліку тасок і збоїв купонів) та містить еквівалент у USD і UAH."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        task_records = [
+            {"title": "Explore Deals", "status": "COMPLETED", "coins": 15, "reason": "Зараховано"},
+            {"title": "GoGo Match", "status": "SKIPPED", "coins": 0, "reason": "Міні-гра"}
+        ]
+        coupon_records = [
+            {"id": "web_coupon_center_daily", "status": "FAILED", "reason": "Ендпоінти не відповіли"}
+        ]
+
+        dispatcher.add_summary(AccountSummary(
+            name="Primary_Account",
+            checkin_status="SUCCESS",
+            coins_earned=55,
+            streak_days=7,
+            total_coins=1555,
+            initial_coins=1500,
+            pc_status="SUCCESS",
+            pc_coins=25,
+            mobile_status="SUCCESS",
+            mobile_coins=15,
+            tasks_done=1,
+            tasks_coins=15,
+            tasks_skipped=1,
+            coupons_claimed=0,
+            task_details=task_records,
+            coupon_details=coupon_records
+        ))
+
+        with patch.dict(os.environ, {"USD_TO_UAH_RATE": "40.0"}), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            ok = dispatcher.send_telegram_notification()
+            self.assertTrue(ok)
+            call_text = mock_post.call_args[1]["json"]["text"]
+
+            # 1. Основна інформація присутня
+            self.assertIn("🪙 Зароблено сьогодні: <b>+55 🪙</b> (<b>+$0.55 ≈ 22.0 грн</b>)", call_text)
+            self.assertIn("💰 Баланс: <code>1,500</code> ➔ <b>1,555 🪙</b> (<b>+55</b>) • <b>$15.55 ≈ 622.0 грн</b>", call_text)
+            self.assertIn("🛍️ Таски: <b>1</b> вик. (+15 🪙), 1 пропущ.", call_text)
+
+            # 2. Рутинні кулі та невдалі купони відсутні (стислий режим)
+            self.assertNotIn("• ✅", call_text)
+            self.assertNotIn("• ⏭️", call_text)
+            self.assertNotIn("Explore Deals", call_text)
+            self.assertNotIn("GoGo Match", call_text)
+            self.assertNotIn("web_coupon_center_daily", call_text)
+            self.assertNotIn("⚠️ Не отримано", call_text)
+
+    def test_get_usd_to_uah_rate_env_override_and_fallback(self):
+        """Перевіряє роботу отримання курсу НБУ, змінної оточення та аварійного значення 42.0."""
+        from src.notifications import get_usd_to_uah_rate, _format_fiat_equiv
+
+        # 1. Перевизначення через змінну оточення
+        with patch.dict(os.environ, {"USD_TO_UAH_RATE": "45.5"}):
+            self.assertEqual(get_usd_to_uah_rate(), 45.5)
+            self.assertEqual(_format_fiat_equiv(100, rate=45.5), "$1.00 ≈ 45.5 грн")
+            self.assertEqual(_format_fiat_equiv(100, rate=45.5, show_sign=True), "+$1.00 ≈ 45.5 грн")
+            self.assertEqual(_format_fiat_equiv(0, rate=45.5, show_sign=True), "$0.00 ≈ 0.0 грн")
+
+        # 2. Аварійний fallback на 42.0 при збої мережі
+        with patch.dict(os.environ, {"USD_TO_UAH_RATE": ""}, clear=False), \
+             patch("requests.get", side_effect=Exception("Network timeout")):
+            rate = get_usd_to_uah_rate(force_refresh=True)
+            self.assertEqual(rate, 42.0)
+
+    def test_telegram_detailed_mode_toggled_via_env_var(self):
+        """Перевіряє активацію детального режиму через TELEGRAM_DETAILED_TASKS=1."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+
+        dispatcher.add_summary(AccountSummary(
+            name="Detailed_Account",
+            checkin_status="SUCCESS",
+            coins_earned=10,
+            tasks_done=1,
+            tasks_coins=10,
+            task_details=[
+                {"title": "Special Deals", "status": "COMPLETED", "coins": 10, "reason": "Зараховано"}
+            ]
+        ))
+
+        with patch.dict(os.environ, {"TELEGRAM_DETAILED_TASKS": "1"}), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            call_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("Special Deals", call_text)
+            self.assertIn("• ✅ <i>Special Deals</i> (+10 🪙)", call_text)
 
 
 if __name__ == "__main__":

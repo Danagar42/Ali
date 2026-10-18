@@ -26,6 +26,69 @@ def _format_coins(val: Any) -> str:
     return str(val)
 
 
+_USD_TO_UAH_CACHE: Optional[float] = None
+
+
+def get_usd_to_uah_rate(force_refresh: bool = False) -> float:
+    """
+    Отримує актуальний офіційний курс USD до UAH від НБУ.
+    Підтримує перевизначення через змінну середовища USD_TO_UAH_RATE.
+    Має fallback на 42.0 при недоступності мережі або таймауті.
+    Результат кешується для уникнення повторних запитів під час одного запуску.
+    """
+    global _USD_TO_UAH_CACHE
+    env_val = os.getenv("USD_TO_UAH_RATE", "").strip()
+    if env_val:
+        try:
+            val = float(env_val)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+
+    if not force_refresh and _USD_TO_UAH_CACHE is not None:
+        return _USD_TO_UAH_CACHE
+
+    url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json"
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                rate = data[0].get("rate")
+                if isinstance(rate, (int, float)) and rate > 0:
+                    _USD_TO_UAH_CACHE = float(rate)
+                    return _USD_TO_UAH_CACHE
+    except Exception as e:
+        logger.debug(f"Не вдалося отримати курс НБУ ({e}), використовується базовий курс 42.0")
+
+    _USD_TO_UAH_CACHE = 42.0
+    return _USD_TO_UAH_CACHE
+
+
+def _format_fiat_equiv(coins: Any, rate: Optional[float] = None, show_sign: bool = False) -> str:
+    """
+    Форматує еквівалент монет AliExpress у USD ($) та UAH (грн).
+    Правило AliExpress: 100 монет = $1.00 USD (1 монета = $0.01 USD).
+    """
+    if rate is None or rate <= 0:
+        rate = get_usd_to_uah_rate()
+
+    try:
+        c_val = int(coins) if isinstance(coins, (int, float)) else int(str(coins).replace(",", "").strip())
+    except Exception:
+        c_val = 0
+
+    usd = c_val * 0.01
+    uah = usd * rate
+
+    if show_sign and c_val != 0:
+        sign = "+" if c_val > 0 else "-"
+        return f"{sign}${abs(usd):.2f} ≈ {abs(uah):.1f} грн"
+    else:
+        return f"${usd:.2f} ≈ {uah:.1f} грн"
+
+
 def _safe_truncate_html(text: str, max_length: int = 4000) -> str:
     """
     Безпечно скорочує повідомлення з HTML-розміткою для Telegram API:
@@ -427,20 +490,23 @@ class NotificationDispatcher:
 
         return content
 
-    def send_telegram_notification(self) -> bool:
+    def send_telegram_notification(self, detailed: Optional[bool] = None) -> bool:
         """
         Надсилає структуроване та детальне сповіщення у Telegram (якщо вказано токен та chat_id).
-        Включає:
-        - Загальний статус та розподіл монет (чекін + таски)
-        - Початковий та фінальний баланс монет по кожному акаунту
-        - Розбивку чекіну по каналах PC та Mobile
-        - Список виконаних, пропущених та збійних завдань
-        - Зібрані купони
-        - Попередження при капчі або прострочених сесіях
+        За замовчуванням генерує стислий звіт без переліку рутинних тасок та невдалих купонів,
+        із відображенням фіатного еквівалента зароблених та накопичених монет (USD + UAH).
+        Детальний перелік тасок і купонів доступний через параметр detailed=True або
+        змінну середовища TELEGRAM_DETAILED_TASKS=1.
         """
         if not self.telegram_bot_token or not self.telegram_chat_id:
             logger.debug("Telegram credentials не налаштовані, сповіщення пропущено.")
             return False
+
+        if detailed is None:
+            env_val = os.getenv("TELEGRAM_DETAILED_TASKS", "").strip().lower()
+            is_detailed = env_val in ("1", "true", "yes")
+        else:
+            is_detailed = bool(detailed)
 
         total_accounts = len(self.summaries)
         successful_accounts = sum(
@@ -478,11 +544,22 @@ class NotificationDispatcher:
         else:
             status_header = "🚀 <b>AliExpress Daily Farm: Звіт</b>"
 
+        rate = get_usd_to_uah_rate()
+        fiat_today = _format_fiat_equiv(total_coins, rate=rate, show_sign=True)
+
         msg_lines = [
             status_header,
             f"👤 Акаунтів: <b>{successful_accounts}/{total_accounts}</b>",
-            f"🪙 Зароблено монет: <b>+{total_coins}</b> (чекін: +{total_checkin_coins}, таски: +{total_tasks_coins})",
         ]
+        if total_coins > 0:
+            coins_line = f"🪙 Зароблено сьогодні: <b>+{total_coins} 🪙</b> (<b>{fiat_today}</b>)"
+        else:
+            coins_line = f"🪙 Зароблено сьогодні: <b>0 🪙</b> (<b>{fiat_today}</b>)"
+
+        if total_checkin_coins > 0 or total_tasks_coins > 0:
+            coins_line += f" <i>(чекін: +{total_checkin_coins}, таски: +{total_tasks_coins})</i>"
+        msg_lines.append(coins_line)
+
         if total_coupons > 0:
             msg_lines.append(f"🎟️ Купонів зібрано: <b>{total_coupons}</b>")
         msg_lines.append("")
@@ -516,8 +593,9 @@ class NotificationDispatcher:
             # Розширені деталі для акаунту
             sub_lines = []
 
-            # 1. Початковий та фінальний баланс монет
+            # 1. Початковий та фінальний баланс монет + фіатний еквівалент
             if s.total_coins is not None:
+                fiat_total = _format_fiat_equiv(s.total_coins, rate=rate, show_sign=False)
                 if s.initial_coins is not None:
                     actual_diff = int(s.total_coins) - int(s.initial_coins)
                     diff_str = f"+{actual_diff}" if actual_diff > 0 else str(actual_diff)
@@ -525,19 +603,20 @@ class NotificationDispatcher:
                     if actual_diff != earned_v:
                         sub_lines.append(
                             f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
-                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>)"
+                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>) • <b>{fiat_total}</b>"
                         )
                     elif earned_v > 0 or actual_diff != 0:
                         sub_lines.append(
                             f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
-                            f"(<b>{diff_str}</b>)"
+                            f"(<b>{diff_str}</b>) • <b>{fiat_total}</b>"
                         )
                     else:
-                        sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>")
+                        sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b> • <b>{fiat_total}</b>")
                 else:
-                    sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>")
+                    sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b> • <b>{fiat_total}</b>")
             elif earned_v > 0:
-                sub_lines.append(f"   💰 Зароблено сьогодні: <b>+{earned_v} 🪙</b> (загальний баланс не отримано)")
+                fiat_earned = _format_fiat_equiv(earned_v, rate=rate, show_sign=True)
+                sub_lines.append(f"   💰 Зароблено сьогодні: <b>+{earned_v} 🪙</b> (<b>{fiat_earned}</b>) (загальний баланс не отримано)")
 
             # 2. Двоканальний чекін (PC + Mobile)
             if s.pc_status or s.mobile_status:
@@ -587,8 +666,8 @@ class NotificationDispatcher:
                     task_parts.append(f"{tasks_f_v} збій")
                 sub_lines.append(f"   🛍️ Таски: {', '.join(task_parts)}")
 
-                # Відображення деталей завдань (до 10 елементів, пріоритет виконаних)
-                if s.task_details and isinstance(s.task_details, list):
+                # Відображення деталей завдань ТІЛЬКИ в детальному режимі
+                if is_detailed and s.task_details and isinstance(s.task_details, list):
                     # Групуємо багаторазові виконані таски (timesLimit > 1) за базовою назвою
                     completed_grouped: Dict[str, Dict[str, Any]] = {}
                     other_tasks: List[Dict[str, Any]] = []
@@ -661,12 +740,12 @@ class NotificationDispatcher:
             coupons_v = int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0
             if coupons_v > 0:
                 sub_lines.append(f"   🎟️ Купони: <b>{coupons_v}</b> зібрано")
-                if s.coupon_details and isinstance(s.coupon_details, list):
+                if is_detailed and s.coupon_details and isinstance(s.coupon_details, list):
                     for c in s.coupon_details[:3]:
                         if isinstance(c, dict) and c.get("status") == "SUCCESS":
                             c_name = html.escape(str(c.get("id", "Купон")))
                             sub_lines.append(f"     • 🎟️ <i>{c_name}</i> (✅ отримано)")
-            elif s.coupon_details and isinstance(s.coupon_details, list):
+            elif is_detailed and s.coupon_details and isinstance(s.coupon_details, list):
                 valid_coupons = [c for c in s.coupon_details if isinstance(c, dict)]
                 if any(c.get("status") == "FAILED" for c in valid_coupons):
                     f_reason = next((c.get("reason") for c in valid_coupons if c.get("status") == "FAILED" and c.get("reason")), "Збій")
@@ -718,7 +797,7 @@ class NotificationDispatcher:
             logger.warning(f"Помилка при відправці сповіщення у Telegram: {e}")
             return False
 
-    def dispatch(self):
+    def dispatch(self, detailed: Optional[bool] = None):
         """Виконує відправку у всі налаштовані канали."""
         self.generate_step_summary()
-        self.send_telegram_notification()
+        self.send_telegram_notification(detailed=detailed)
