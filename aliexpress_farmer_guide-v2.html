@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="uk" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Повна інструкція: AliExpress Coin & Coupon Farmer</title>
+  <style>
+    :root {
+      --bg-main: #0d1117;
+      --bg-card: #161b22;
+      --bg-card-hover: #1c222b;
+      --bg-elevated: #21262d;
+      --bg-code: #090c10;
+      --text-main: #e6edf3;
+      --text-muted: #8b949e;
+      --border-color: #30363d;
+      --ali-primary: #ff4747;
+      --ali-secondary: #ff7a00;
+      --tg-blue: #24a1de;
+      --gh-green: #2ea043;
+      --gh-green-bg: rgba(46, 160, 67, 0.14);
+      --warn-amber: #d29922;
+      --warn-bg: rgba(210, 153, 34, 0.14);
+      --danger-red: #f85149;
+      --danger-bg: rgba(248, 81, 73, 0.14);
+      --info-bg: rgba(36, 161, 222, 0.12);
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      --radius-lg: 16px;
+      --radius-md: 12px;
+      --radius-sm: 8px;
+    }
+
+    [data-theme="light"] {
+      --bg-main: #f6f8fa;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f3f4f6;
+      --bg-elevated: #eaeef2;
+      --bg-code: #1f242c;
+      --text-main: #1f2328;
+      --text-muted: #59636e;
+      --border-color: #d0d7de;
+      --gh-green-bg: rgba(46, 160, 67, 0.1);
+      --warn-bg: rgba(210, 153, 34, 0.12);
+      --danger-bg: rgba(248, 81, 73, 0.1);
+      --info-bg: rgba(36, 161, 222, 0.1);
+      --shadow: 0 6px 20px rgba(31, 35, 40, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.65;
+      padding-bottom: 60px;
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    /* Sticky Top Progress & Navbar */
+    .top-bar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(22, 27, 34, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    [data-theme="light"] .top-bar {
+      background: rgba(255, 255, 255, 0.88);
+    }
+
+    .top-bar-inner {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.05rem;
+      text-decoration: none;
+      color: var(--text-main);
+    }
+
+    .brand-badge {
+      background: linear-gradient(135deg, var(--ali-primary), var(--ali-secondary));
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+
+    .nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .progress-track {
+      width: 120px;
+      height: 8px;
+      background: var(--bg-elevated);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--ali-primary), var(--gh-green));
+      transition: width 0.3s ease;
+    }
+
+    .theme-btn {
+      background: var(--bg-elevated);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+
+    .theme-btn:hover {
+      border-color: var(--ali-primary);
+    }
+
+    /* Container & Layout */
+    .container {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 32px 24px 0;
+    }
+
+    /* Hero Header */
+    .hero {
+      position: relative;
+      background: linear-gradient(135deg, rgba(255, 71, 71, 0.14) 0%, rgba(36, 161, 222, 0.12) 100%);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 36px 32px;
+      margin-bottom: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .hero h1 {
+      font-size: clamp(1.6rem, 3.2vw, 2.3rem);
+      line-height: 1.25;
+      margin-bottom: 12px;
+      font-weight: 800;
+    }
+
+    .hero p {
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      max-width: 780px;
+      margin-bottom: 20px;
+    }
+
+    .hero-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 13px;
+      border-radius: 999px;
+      font-size: 0.83rem;
+      font-weight: 600;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+    }
+
+    /* Quick Jump Navigation */
+    .quick-nav {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .quick-nav a {
+      text-decoration: none;
+      color: var(--text-main);
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      padding: 10px 14px;
+      border-radius: var(--radius-md);
+      font-size: 0.88rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: transform 0.15s ease, border-color 0.2s ease;
+    }
+
+    .quick-nav a:hover {
+      transform: translateY(-2px);
+      border-color: var(--ali-primary);
+    }
+
+    /* Section Cards */
+    .section-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow);
+      transition: border-color 0.2s ease;
+    }
+
+    .section-card.completed {
+      border-color: var(--gh-green);
+    }
+
+    .section-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border-color);
+      flex-wrap: wrap;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .step-number {
+      background: linear-gradient(135deg, var(--ali-primary), var(--ali-secondary));
+      color: #fff;
+      font-weight: 800;
+      font-size: 0.85rem;
+      padding: 4px 10px;
+      border-radius: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+
+    .section-title h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+    }
+
+    /* Step Done Checkbox */
+    .step-check-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: var(--bg-elevated);
+      padding: 6px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      user-select: none;
+      border: 1px solid var(--border-color);
+      transition: all 0.2s ease;
+    }
+
+    .step-check-label input {
+      accent-color: var(--gh-green);
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
+    .step-check-label:hover {
+      border-color: var(--gh-green);
+      color: var(--text-main);
+    }
+
+    /* Info Grid for Important Nuances */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .info-box {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 18px;
+    }
+
+    .info-box h3 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .info-box p, .info-box ul {
+      font-size: 0.92rem;
+      color: var(--text-muted);
+    }
+
+    .info-box ul {
+      padding-left: 18px;
+      margin-top: 6px;
+    }
+
+    /* Callouts */
+    .callout {
+      padding: 14px 18px;
+      border-radius: var(--radius-md);
+      margin: 16px 0;
+      font-size: 0.94rem;
+      border-left: 4px solid;
+    }
+
+    .callout-title {
+      font-weight: 700;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .callout.info {
+      background: var(--info-bg);
+      border-left-color: var(--tg-blue);
+    }
+
+    .callout.warn {
+      background: var(--warn-bg);
+      border-left-color: var(--warn-amber);
+    }
+
+    .callout.danger {
+      background: var(--danger-bg);
+      border-left-color: var(--danger-red);
+    }
+
+    .callout.success {
+      background: var(--gh-green-bg);
+      border-left-color: var(--gh-green);
+    }
+
+    /* Ordered Lists */
+    .step-list {
+      list-style: none;
+      counter-reset: step-counter;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin: 14px 0;
+    }
+
+    .step-list li {
+      counter-increment: step-counter;
+      position: relative;
+      padding: 12px 16px 12px 48px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      font-size: 0.96rem;
+    }
+
+    .step-list li::before {
+      content: counter(step-counter);
+      position: absolute;
+      left: 14px;
+      top: 12px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--ali-primary);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.8rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Inline Code & Copyable Snippets */
+    code {
+      font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+      background: rgba(110, 118, 129, 0.2);
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-size: 0.88em;
+    }
+
+    .copy-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-main);
+      border: 1px solid var(--border-color);
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.86rem;
+      cursor: pointer;
+      color: var(--text-main);
+      transition: border-color 0.2s ease, background 0.2s ease;
+    }
+
+    .copy-chip:hover {
+      border-color: var(--ali-primary);
+    }
+
+    .copy-chip .copy-icon {
+      font-size: 0.78rem;
+      opacity: 0.75;
+    }
+
+    /* Code Block */
+    .code-block-wrap {
+      position: relative;
+      margin: 10px 0 4px;
+    }
+
+    pre {
+      background: var(--bg-code);
+      color: #e6edf3;
+      padding: 14px 18px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border-color);
+      overflow-x: auto;
+      font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+      font-size: 0.85rem;
+      line-height: 1.55;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.76rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: rgba(255, 255, 255, 0.24);
+    }
+
+    /* Tabs */
+    .tabs-group {
+      margin-top: 12px;
+    }
+
+    .tabs-header {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      background: var(--bg-elevated);
+      color: var(--text-muted);
+      border: 1px solid var(--border-color);
+      padding: 9px 15px;
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      background: var(--ali-primary);
+      color: #fff;
+      border-color: var(--ali-primary);
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    /* Interactive Cookie Checker */
+    .cookie-tester {
+      margin-top: 20px;
+      padding: 18px;
+      background: var(--bg-elevated);
+      border: 1px dashed var(--border-color);
+      border-radius: var(--radius-md);
+    }
+
+    .cookie-tester h4 {
+      margin-bottom: 6px;
+      font-size: 0.98rem;
+    }
+
+    .cookie-tester p {
+      font-size: 0.86rem;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+
+    .cookie-input {
+      width: 100%;
+      min-height: 74px;
+      background: var(--bg-main);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      font-family: monospace;
+      font-size: 0.84rem;
+      resize: vertical;
+      margin-bottom: 10px;
+    }
+
+    .cookie-status {
+      font-size: 0.88rem;
+      font-weight: 600;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      display: none;
+    }
+
+    /* Table */
+    .table-wrap {
+      overflow-x: auto;
+      margin: 16px 0;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border-color);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.93rem;
+    }
+
+    th, td {
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    th {
+      background: var(--bg-elevated);
+      font-weight: 700;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    /* Telegram Chat Preview */
+    .tg-mockup {
+      background: linear-gradient(160deg, #182533 0%, #0e1621 100%);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      border: 1px solid #2b5278;
+      max-width: 640px;
+      color: #f5f5f5;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+    }
+
+    .tg-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .tg-avatar {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #24a1de, #1b7db3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+    }
+
+    .tg-bot-name {
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+
+    .tg-bot-status {
+      font-size: 0.78rem;
+      color: #6ab3f3;
+    }
+
+    .tg-bubble {
+      background: #182533;
+      border: 1px solid #2b5278;
+      border-radius: 14px 14px 14px 4px;
+      padding: 14px 16px;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      position: relative;
+    }
+
+    .tg-time {
+      text-align: right;
+      font-size: 0.72rem;
+      color: #7f91a4;
+      margin-top: 6px;
+      font-family: sans-serif;
+    }
+
+    /* FAQ Accordion */
+    details {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      margin-bottom: 10px;
+      padding: 14px 18px;
+      transition: border-color 0.2s ease;
+    }
+
+    details:hover {
+      border-color: var(--ali-primary);
+    }
+
+    summary {
+      font-weight: 700;
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    summary::-webkit-details-marker {
+      display: none;
+    }
+
+    summary::after {
+      content: "＋";
+      font-weight: 800;
+      color: var(--ali-primary);
+      transition: transform 0.2s ease;
+    }
+
+    details[open] summary::after {
+      content: "－";
+    }
+
+    details p, details ul {
+      margin-top: 10px;
+      color: var(--text-muted);
+      font-size: 0.93rem;
+    }
+
+    details ul {
+      padding-left: 20px;
+    }
+
+    a {
+      color: var(--tg-blue);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--gh-green);
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 0.88rem;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      opacity: 0;
+      transform: translateY(12px);
+      pointer-events: none;
+      transition: all 0.25s ease;
+      z-index: 999;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 640px) {
+      .hero, .section-card {
+        padding: 20px 18px;
+      }
+      .top-bar-inner {
+        padding: 10px 16px;
+      }
+    }
+
+    @media print {
+      .top-bar, .quick-nav, .cookie-tester, .theme-btn, .step-check-label {
+        display: none !important;
+      }
+      body {
+        background: #fff;
+        color: #000;
+      }
+      .section-card {
+        box-shadow: none;
+        border: 1px solid #ccc;
+        page-break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Sticky Header with Progress & Theme Switcher -->
+  <header class="top-bar">
+    <div class="top-bar-inner">
+      <a href="#" class="brand">
+        <span>🪙 AliExpress Coin & Coupon Farmer</span>
+        <span class="brand-badge">v2.1 Guide</span>
+      </a>
+      <div class="nav-controls">
+        <div class="progress-wrap" title="Позначайте виконані кроки нижче">
+          <span id="progress-text">Прогрес: 0/5</span>
+          <div class="progress-track">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+        <button class="theme-btn" id="theme-toggle" type="button">
+          <span id="theme-icon">☀️</span>
+          <span id="theme-label">Світла тема</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Hero Section -->
+    <section class="hero">
+      <h1>📖 Повна інструкція з налаштування AliExpress Farmer</h1>
+      <p>
+        Покроковий посібник із клонування та розгортання автоматичного щоденного збору монет (Web + Mobile App), виконання безпечних завдань та купонів AliExpress через хмару <strong>GitHub Actions</strong> із персональними звітами в <strong>Telegram</strong>.
+      </p>
+      <div class="hero-badges">
+        <span class="pill">☁️ Працює без увімкненого ПК</span>
+        <span class="pill">🔒 Приватне клонування в GitHub</span>
+        <span class="pill">🤖 Мультиакаунтинг</span>
+        <span class="pill">📱 Подвійний чекін (PC + App)</span>
+      </div>
+    </section>
+
+    <!-- Quick Navigation -->
+    <nav class="quick-nav">
+      <a href="#nuances">🌍 Важливі нюанси</a>
+      <a href="#step-1">🔒 1. Клонування репо</a>
+      <a href="#step-2">🤖 2. Telegram-бот</a>
+      <a href="#step-3">🍪 3. Куки сесії</a>
+      <a href="#step-4">🔑 4. GitHub Secrets</a>
+      <a href="#step-5">▶️ 5. Перший запуск</a>
+      <a href="#faq">🛠️ Помилки та FAQ</a>
+    </nav>
+
+    <!-- Nuances Section -->
+    <section class="section-card" id="nuances">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Важливо</span>
+          <h2>🌍 Ключові моменти перед початком</h2>
+        </div>
+      </div>
+
+      <div class="info-grid">
+        <div class="info-box">
+          <h3>🌐 1. Глобальний домен</h3>
+          <p>Авторизуйтесь виключно на глобальному сайті <a href="https://www.aliexpress.com" target="_blank" rel="noopener"><strong>www.aliexpress.com</strong></a>.</p>
+          <ul>
+            <li>Уникайте регіональних піддоменів (<code>.pl</code>, <code>.ru</code>, <code>.us</code>).</li>
+            <li>Перед зняттям куків відкрийте розділ <a href="https://www.aliexpress.com/p/coin-pc-index/index.html" target="_blank" rel="noopener">Монети на ПК</a>, щоб згенерувати токени <code>_m_h5_tk</code>.</li>
+          </ul>
+        </div>
+
+        <div class="info-box">
+          <h3>💵 2. Курс та валюта</h3>
+          <p>У системі AliExpress монети уніфіковані для всіх країн:</p>
+          <ul>
+            <li><strong>100 монет = $1.00 USD</strong> (1 монета = $0.01).</li>
+            <li>Щоденний звіт у Telegram автоматично показує баланс у монетах, доларах США та еквівалент у гривні (₴).</li>
+          </ul>
+        </div>
+
+        <div class="info-box">
+          <h3>⏰ 3. Розклад запусків</h3>
+          <p>Скрипт працює за всесвітнім часом (UTC):</p>
+          <ul>
+            <li>Основний: <strong>09:09 UTC</strong> (<span id="local-time-1">11:09 / 12:09 за Києвом</span>)</li>
+            <li>Резервний: <strong>14:09 UTC</strong> (<span id="local-time-2">16:09 / 17:09 за Києвом</span>)</li>
+            <li>Затримка GitHub Cron на 5–20 хв у години пік є нормою.</li>
+          </ul>
+        </div>
+
+        <div class="info-box">
+          <h3>🛡️ 4. Захист Alibaba WAF</h3>
+          <p>Сервери GitHub працюють із дата-центрів США та ЄС.</p>
+          <ul>
+            <li>Якщо система безпеки покаже капчу (<code>RG_SEC</code>), відкрийте додаток AliExpress на смартфоні або сайт у браузері та зберіть монети вручну <strong>один раз</strong> — блокування зніметься.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 1: CLONING INTO PRIVATE REPO -->
+    <section class="section-card" id="step-1" data-step="1">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Крок 1</span>
+          <h2>🔒 Клонування цього репозиторію у власний ПРИВАТНИЙ</h2>
+        </div>
+        <label class="step-check-label">
+          <input type="checkbox" class="step-checkbox" data-step-id="1" />
+          <span>Виконано</span>
+        </label>
+      </div>
+
+      <div class="callout info">
+        <div class="callout-title">🛡️ Чому потрібно саме приватне клонування, а не звичайний Fork?</div>
+        GitHub не дозволяє зробити стандартний <em>Fork</em> публічного репозиторію приватним. А в приватному репозиторії (<strong>Private</strong>) сторонні користувачі не зможуть побачити ваші логи запусків, баланс монет чи назви ваших акаунтів. Оберіть будь-який зручний спосіб нижче:
+      </div>
+
+      <div class="tabs-group">
+        <div class="tabs-header">
+          <button class="tab-btn active" onclick="switchTab(event, 'clone-import')">Спосіб А: Імпорт у браузері (За 30 сек, без консолі)</button>
+          <button class="tab-btn" onclick="switchTab(event, 'clone-git')">Спосіб Б: Класичний git clone (Через термінал)</button>
+          <button class="tab-btn" onclick="switchTab(event, 'clone-template')">Спосіб В: Кнопка «Use this template» / Fork</button>
+        </div>
+
+        <!-- Method A: GitHub Importer -->
+        <div id="clone-import" class="tab-panel active">
+          <p style="margin-bottom: 10px; color: var(--text-muted); font-size: 0.93rem;">
+            Офіційний інструмент GitHub, який автоматично клонує цей репозиторій у ваш власний <strong>Private</strong> репозиторій прямо в браузері:
+          </p>
+          <ol class="step-list">
+            <li>Увійдіть у свій акаунт на <a href="https://github.com" target="_blank" rel="noopener"><strong>GitHub.com</strong></a>.</li>
+            <li>Натисніть іконку <strong>«+»</strong> у правому верхньому куті ➔ виберіть <a href="https://github.com/new/import" target="_blank" rel="noopener"><strong>Import repository</strong></a>.</li>
+            <li>У перше поле <strong>Your old repository’s clone URL</strong> вставте посилання на цей вихідний репозиторій.</li>
+            <li>У поле <strong>Repository name</strong> введіть назву для вашої копії, наприклад: <span class="copy-chip" onclick="copyText('ali-farmer')">ali-farmer <span class="copy-icon">📋</span></span>.</li>
+            <li>У блоці конфіденційності обов'язково виберіть <strong>🔒 Private</strong>.</li>
+            <li>Натисніть зелену кнопку <strong>Begin import</strong> — за 15–30 секунд повна приватна копія проекту буде готова!</li>
+          </ol>
+        </div>
+
+        <!-- Method B: Git Clone in Terminal -->
+        <div id="clone-git" class="tab-panel">
+          <p style="margin-bottom: 10px; color: var(--text-muted); font-size: 0.93rem;">
+            Якщо ви звикли працювати з Git через консоль на своєму комп'ютері:
+          </p>
+          <ol class="step-list">
+            <li>
+              Створіть порожній приватний репозиторій на GitHub: натисніть <strong>«+» ➔ New repository</strong>, вкажіть назву <span class="copy-chip" onclick="copyText('ali-farmer')">ali-farmer <span class="copy-icon">📋</span></span>, оберіть тип <strong>🔒 Private</strong> і натисніть <strong>Create repository</strong> <em>(галочку «Add a README file» ставити не потрібно)</em>.
+            </li>
+            <li>
+              Клонуйте вихідний репозиторій собі на ПК та перейдіть у його папку:
+              <div class="code-block-wrap">
+                <button class="copy-btn" onclick="copyText('git clone https://github.com/ АВТОР /ali-farmer.git
+cd ali-farmer')">Копіювати</button>
+                <pre>git clone https://github.com/АВТОР/ali-farmer.git
+cd ali-farmer</pre>
+              </div>
+            </li>
+            <li>
+              Змініть адресу віддаленого репозиторію (<code>origin</code>) на свій щойно створений приватний репозиторій і відправте код:
+              <div class="code-block-wrap">
+                <button class="copy-btn" onclick="copyText('git remote set-url origin https://github.com/ВАШ_ЛОГІН/ali-farmer.git
+git branch -M main
+git push -u origin main')">Копіювати</button>
+                <pre>git remote set-url origin https://github.com/ВАШ_ЛОГІН/ali-farmer.git
+git branch -M main
+git push -u origin main</pre>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <!-- Method C: Use this template / Fork -->
+        <div id="clone-template" class="tab-panel">
+          <ol class="step-list">
+            <li>
+              <strong>Якщо у репозиторії активна зелена кнопка «Use this template»</strong> (угорі праворуч): натисніть її ➔ <strong>Create a new repository</strong> ➔ введіть назву <code>ali-farmer</code>, оберіть <strong>🔒 Private</strong> та натисніть <strong>Create repository</strong>. Це миттєво клонує весь проект у приватний репозиторій в один клік!
+            </li>
+            <li>
+              <strong>Якщо ви робите звичайний Fork:</strong> після створення форку обов'язково відкрийте вкладку <strong>Actions</strong> у своєму репозиторії та натисніть зелену кнопку <strong>«I understand my workflows, go ahead and enable them»</strong> (інакше розклад у форках вимкнений за замовчуванням).
+            </li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 2 -->
+    <section class="section-card" id="step-2" data-step="2">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Крок 2</span>
+          <h2>🤖 Створення Telegram-бота для щоденних звітів</h2>
+        </div>
+        <label class="step-check-label">
+          <input type="checkbox" class="step-checkbox" data-step-id="2" />
+          <span>Виконано</span>
+        </label>
+      </div>
+
+      <ol class="step-list">
+        <li>Відкрийте Telegram і перейдіть до офіційного бота <a href="https://t.me/BotFather" target="_blank" rel="noopener"><strong>@BotFather</strong></a>.</li>
+        <li>Натисніть <strong>Start</strong> та надішліть команду створення нового бота: <span class="copy-chip" onclick="copyText('/newbot')">/newbot <span class="copy-icon">📋</span></span>.</li>
+        <li>Введіть довільне ім'я бота (наприклад: <code>AliExpress Coin Farmer</code>).</li>
+        <li>Введіть унікальний юзернейм, який обов'язково закінчується на <code>bot</code> (наприклад: <code>max_ali_coins_2026_bot</code>).</li>
+        <li>Скопіюйте виданий HTTP API токен вигляду <code>7123456789:AAFlm3kX...</code> — це ваш майбутній секрет <span class="copy-chip" onclick="copyText('TELEGRAM_BOT_TOKEN')">TELEGRAM_BOT_TOKEN <span class="copy-icon">📋</span></span>.</li>
+        <li>Відкрийте бота <a href="https://t.me/userinfobot" target="_blank" rel="noopener"><strong>@userinfobot</strong></a> або <a href="https://t.me/getmyid_bot" target="_blank" rel="noopener"><strong>@getmyid_bot</strong></a>, натисніть <code>/start</code> і скопіюйте ваш числовий ID (наприклад, <code>987654321</code>) — це ваш <span class="copy-chip" onclick="copyText('TELEGRAM_CHAT_ID')">TELEGRAM_CHAT_ID <span class="copy-icon">📋</span></span>.</li>
+      </ol>
+
+      <div class="callout danger">
+        <div class="callout-title">❗ ОБОВ'ЯЗКОВИЙ ФІНАЛЬНИЙ ШТРИХ У TELEGRAM:</div>
+        Перейдіть за посиланням на <strong>вашого щойно створеного бота</strong> у Telegram і натисніть кнопку <strong>START (<code>/start</code>)</strong>. Якщо не активувати діалог першим повідомленням, Telegram заблокує доставку звітів із помилкою <code>400 Bad Request: chat not found</code>!
+      </div>
+    </section>
+
+    <!-- STEP 3 -->
+    <section class="section-card" id="step-3" data-step="3">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Крок 3</span>
+          <h2>🍪 Отримання авторизаційних Cookies із браузера</h2>
+        </div>
+        <label class="step-check-label">
+          <input type="checkbox" class="step-checkbox" data-step-id="3" />
+          <span>Виконано</span>
+        </label>
+      </div>
+
+      <div class="callout success">
+        <div class="callout-title">🔥 Профі-лайфхак для максимальної живучості сесії (Режим Інкогніто):</div>
+        Відкрийте нове вікно браузера в <strong>режимі Інкогніто (Private Window)</strong>, увійдіть на <a href="https://www.aliexpress.com" target="_blank" rel="noopener">aliexpress.com</a>, скопіюйте куки за інструкцією нижче і <strong>просто закрийте вікно Інкогніто (НЕ натискаючи «Вийти / Sign Out»)</strong>. Так сесія для GitHub-скрипта буде ізольованою і не злітатиме під час вашого звичайного серфінгу!
+      </div>
+
+      <div class="tabs-group">
+        <div class="tabs-header">
+          <button class="tab-btn active" onclick="switchTab(event, 'tab-ext')">Спосіб А: Через розширення Cookie-Editor (Найпростіший)</button>
+          <button class="tab-btn" onclick="switchTab(event, 'tab-devtools')">Спосіб Б: Без розширень (Через DevTools F12)</button>
+        </div>
+
+        <div id="tab-ext" class="tab-panel active">
+          <ol class="step-list">
+            <li>Встановіть розширення <strong>Cookie-Editor</strong> для вашого браузера (Chrome, Edge, Brave, Firefox).</li>
+            <li>Перейдіть на <a href="https://www.aliexpress.com/p/coin-pc-index/index.html" target="_blank" rel="noopener">сторінку монет AliExpress</a> та переконайтесь, що ви авторизовані.</li>
+            <li>Натисніть на іконку <strong>Cookie-Editor</strong> на верхній панелі розширень.</li>
+            <li>Натисніть кнопку <strong>Export</strong> (внизу праворуч) ➔ виберіть <strong>Export as Header String</strong>.</li>
+            <li>Готово! Повний текстовий рядок сесії вже у вашому буфері обміну.</li>
+          </ol>
+        </div>
+
+        <div id="tab-devtools" class="tab-panel">
+          <ol class="step-list">
+            <li>Відкрийте <a href="https://www.aliexpress.com/p/coin-pc-index/index.html" target="_blank" rel="noopener">сторінку монет AliExpress</a> та увійдіть в акаунт.</li>
+            <li>Натисніть клавішу <code>F12</code> (або <code>Ctrl + Shift + I</code>) і відкрийте вкладку <strong>Network</strong> (Мережа).</li>
+            <li>Оновіть сторінку клавішею <code>F5</code> і клацніть на найперший запит у списку (<code>index.html</code> або <code>www.aliexpress.com</code>).</li>
+            <li>Праворуч у вкладці <strong>Headers</strong> прокрутіть до розділу <strong>Request Headers</strong> та знайдіть поле <strong>Cookie</strong>.</li>
+            <li>Скопіюйте весь довгий вміст поля <strong>Cookie</strong> (без самого слова <code>Cookie:</code>).</li>
+          </ol>
+        </div>
+      </div>
+
+      <!-- Offline Cookie Validator -->
+      <div class="cookie-tester">
+        <h4>🧪 Локальний перевіряльник рядка Cookie (100% офлайн у вашому браузері)</h4>
+        <p>Вставте сюди скопійований рядок перед додаванням у GitHub, щоб перевірити, чи це правильний формат <em>Header String</em> (а не JSON) і чи присутні ключові токени авторизації:</p>
+        <textarea id="cookie-input" class="cookie-input" placeholder="Вставте скопійований рядок Cookie сюди для миттєвої перевірки..." oninput="validateCookieString()"></textarea>
+        <div id="cookie-status" class="cookie-status"></div>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-title">⚠️ УВАГА: Не натискайте «Вийти» (Log Out)</div>
+        Натискання кнопки виходу на сайті миттєво анулює скопійовану сесію на серверах AliExpress. Просто закрийте вкладку.
+      </div>
+    </section>
+
+    <!-- STEP 4 -->
+    <section class="section-card" id="step-4" data-step="4">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Крок 4</span>
+          <h2>🔑 Додавання секретів у GitHub Actions</h2>
+        </div>
+        <label class="step-check-label">
+          <input type="checkbox" class="step-checkbox" data-step-id="4" />
+          <span>Виконано</span>
+        </label>
+      </div>
+
+      <ol class="step-list">
+        <li>У вашому клонованому приватному репозиторії на GitHub перейдіть на вкладку <strong>⚙️ Settings</strong> (Налаштування).</li>
+        <li>У лівому боковому меню розгорніть <strong>Secrets and variables</strong> ➔ виберіть <strong>Actions</strong>.</li>
+        <li>Натискайте зелену кнопку <strong>New repository secret</strong> і по черзі створіть 3 обов'язкові секрети з таблиці нижче:</li>
+      </ol>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Назва секрету (клікніть для копіювання)</th>
+              <th>Значення</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="copy-chip" onclick="copyText('ALI_COOKIES')">ALI_COOKIES <span class="copy-icon">📋</span></span></td>
+              <td>Скопійований рядок Cookie з Кроку 3 (формат Header String)</td>
+              <td><strong>Обов'язково</strong></td>
+            </tr>
+            <tr>
+              <td><span class="copy-chip" onclick="copyText('TELEGRAM_BOT_TOKEN')">TELEGRAM_BOT_TOKEN <span class="copy-icon">📋</span></span></td>
+              <td>Токен бота від <code>@BotFather</code> із Кроку 2</td>
+              <td><strong>Обов'язково</strong></td>
+            </tr>
+            <tr>
+              <td><span class="copy-chip" onclick="copyText('TELEGRAM_CHAT_ID')">TELEGRAM_CHAT_ID <span class="copy-icon">📋</span></span></td>
+              <td>Ваш числовий ID у Telegram із Кроку 2</td>
+              <td><strong>Обов'язково</strong></td>
+            </tr>
+            <tr>
+              <td>
+                <span class="copy-chip" onclick="copyText('ALI_COOKIES_1')">ALI_COOKIES_1 <span class="copy-icon">📋</span></span>
+                <span class="copy-chip" onclick="copyText('ALI_COOKIES_2')">ALI_COOKIES_2 <span class="copy-icon">📋</span></span>
+              </td>
+              <td>Додаткові сесії, якщо потрібно фармити 2 або більше акаунтів одночасно</td>
+              <td><em>Опціонально</em></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- STEP 5 -->
+    <section class="section-card" id="step-5" data-step="5">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Крок 5</span>
+          <h2>▶️ Перший тестовий запуск та перевірка звіту</h2>
+        </div>
+        <label class="step-check-label">
+          <input type="checkbox" class="step-checkbox" data-step-id="5" />
+          <span>Виконано</span>
+        </label>
+      </div>
+
+      <ol class="step-list">
+        <li>Перейдіть на вкладку <strong>▶️ Actions</strong> у верхньому меню вашого репозиторію.</li>
+        <li>У лівій панелі виберіть робочий процес <strong>AliExpress Daily Farm</strong>.</li>
+        <li>Праворуч натисніть кнопку <strong>Run workflow</strong> ➔ у спадному вікні натисніть зелену кнопку <strong>Run workflow</strong>.</li>
+        <li>Зачекайте 1–2 хвилини, поки статус зміниться на зелену галочку ✅, і перевірте повідомлення у вашому Telegram-боті!</li>
+      </ol>
+
+      <h3 style="margin: 22px 0 12px; font-size: 1.08rem;">📱 Як виглядає щоденний звіт у Telegram:</h3>
+      <div class="tg-mockup">
+        <div class="tg-header">
+          <div class="tg-avatar">🤖</div>
+          <div>
+            <div class="tg-bot-name">AliExpress Coin Farmer Bot</div>
+            <div class="tg-bot-status">bot • щоденний автоматичний звіт</div>
+          </div>
+        </div>
+        <div class="tg-bubble">🚀 <strong>AliExpress Daily Farm: Звіт</strong>
+👤 Акаунтів: 1/1
+🪙 Зароблено сьогодні: <strong>+85 🪙</strong> (+$0.85 ≈ 38.1 грн) (чекін: +40, таски: +45)
+
+✅ <strong>Account_Primary:</strong> ✅ Зараховано, стрік 7 дн., +85 монет, тасок: 9
+   💰 Баланс: 629 ➔ <strong>714 🪙 (+85)</strong> • $7.14 ≈ 320.3 грн
+   ├ 🖥️ PC: ✅ Зараховано (+20 🪙)
+   └ 📱 App: ✅ Зараховано (+20 🪙)
+   🛍️ Таски: 9 вик. (+45 🪙), 5 пропущ.</div>
+        <div class="tg-time">12:10 ✓✓</div>
+      </div>
+    </section>
+
+    <!-- FAQ & Troubleshooting -->
+    <section class="section-card" id="faq">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="step-number">Довідник</span>
+          <h2>🛠️ Діагностика помилок та Часті запитання (FAQ)</h2>
+        </div>
+      </div>
+
+      <details open>
+        <summary>1. Скільки живуть Cookies і що робити при помилці SESSION_EXPIRED?</summary>
+        <p>
+          Зазвичай сесія живе від кількох тижнів до кількох місяців (особливо якщо вона була створена через вікно Інкогніто). Якщо у звіт прийде статус <code>SESSION_EXPIRED</code>, просто повторіть <strong>Крок 3</strong> і оновіть секрет <code>ALI_COOKIES</code> у налаштуваннях GitHub.
+        </p>
+      </details>
+
+      <details>
+        <summary>2. Що означає помилка капчі (CAPTCHA / RG_SEC) у звіті?</summary>
+        <p>
+          Захисний фаєрвол Alibaba WAF тимчасово попросив підтвердження для IP-адреси дата-центру GitHub. Щоб зняти підозру:
+        </p>
+        <ul>
+          <li>Відкрийте мобільний додаток AliExpress на телефоні або сайт у браузері;</li>
+          <li>Перейдіть у розділ «Монети» і зробіть чекін вручну (посуньте слайдер капчі, якщо з'явиться);</li>
+          <li>При наступному плановому запуску скрипт продовжить роботу у штатному режимі.</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>3. Workflow на GitHub виконався успішно, але в Telegram нічого не прийшло</summary>
+        <p>Перевірте 3 найчастіші причини:</p>
+        <ul>
+          <li>Ви забули натиснути кнопку <strong>START (<code>/start</code>)</strong> у діалозі з вашим створеним ботом;</li>
+          <li>У секреті <code>TELEGRAM_BOT_TOKEN</code> або <code>TELEGRAM_CHAT_ID</code> є зайвий пробіл на початку чи в кінці;</li>
+          <li>Переплутані місцями токен бота та ID чату.</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>4. Чому через 60 днів автоматичний запуск на GitHub може зупинитися?</summary>
+        <p>
+          За правилами GitHub Actions, якщо в репозиторії протягом <strong>60 днів</strong> немає жодної активності (комітів), розклад <code>cron</code> автоматично ставиться на паузу. GitHub надішле попередження на пошту — достатньо зайти у вкладку <strong>Actions</strong> і натиснути кнопку <strong>Enable workflow</strong> (або оновити будь-який файл).
+        </p>
+      </details>
+
+      <details>
+        <summary>5. Як підтягнути оновлення з авторського репозиторію у свій приватний клон?</summary>
+        <p>
+          Якщо ви клонували репозиторій через Git, додайте авторський репозиторій як <code>upstream</code> і підтягуйте зміни командою:
+          <code>git pull upstream main && git push origin main</code>.
+        </p>
+      </details>
+    </section>
+  </main>
+
+  <div id="toast" class="toast">Скопійовано в буфер обміну!</div>
+
+  <script>
+    // 1. Copy to clipboard with toast notification
+    function copyText(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        const toast = document.getElementById('toast');
+        toast.textContent = 'Скопійовано в буфер обміну!';
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2200);
+      });
+    }
+
+    // 2. Scoped Tabs switching (works independently for Step 1 and Step 3)
+    function switchTab(event, tabId) {
+      const group = event.currentTarget.closest('.tabs-group');
+      group.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      group.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+    }
+
+    // 3. Offline Cookie String Validator
+    function validateCookieString() {
+      const val = document.getElementById('cookie-input').value.trim();
+      const statusBox = document.getElementById('cookie-status');
+
+      if (!val) {
+        statusBox.style.display = 'none';
+        return;
+      }
+
+      statusBox.style.display = 'block';
+
+      if (val.startsWith('[') || val.startsWith('{')) {
+        statusBox.style.background = 'var(--danger-bg)';
+        statusBox.style.color = 'var(--danger-red)';
+        statusBox.textContent = '❌ Це JSON-формат! У Cookie-Editor потрібно обрати саме «Export as Header String».';
+        return;
+      }
+
+      const requiredKeys = ['xman_t', 'aep_usuc_f'];
+      const recommendedKeys = ['_m_h5_tk', 'xman_f'];
+      const missingRequired = requiredKeys.filter(k => !val.includes(k + '='));
+      const missingRec = recommendedKeys.filter(k => !val.includes(k + '='));
+
+      if (missingRequired.length > 0) {
+        statusBox.style.background = 'var(--warn-bg)';
+        statusBox.style.color = 'var(--warn-amber)';
+        statusBox.textContent = `⚠️ Рядок схожий на Cookie, але не знайдено ключів авторизації (${missingRequired.join(', ')}). Переконайтесь, що ви увійшли в акаунт на aliexpress.com.`;
+      } else if (missingRec.length > 0) {
+        statusBox.style.background = 'var(--info-bg)';
+        statusBox.style.color = 'var(--tg-blue)';
+        statusBox.textContent = `ℹ️ Авторизація є, але рекомендується відкрити сторінку Монет перед копіюванням, щоб з'явився токен (${missingRec.join(', ')}).`;
+      } else {
+        statusBox.style.background = 'var(--gh-green-bg)';
+        statusBox.style.color = 'var(--gh-green)';
+        statusBox.textContent = '✅ Чудово! Формат Header String правильний, усі ключові токени сесії присутні.';
+      }
+    }
+
+    // 4. Theme Toggle
+    const themeToggle = document.getElementById('theme-toggle');
+    const themeIcon = document.getElementById('theme-icon');
+    const themeLabel = document.getElementById('theme-label');
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      if (theme === 'light') {
+        themeIcon.textContent = '🌙';
+        themeLabel.textContent = 'Темна тема';
+      } else {
+        themeIcon.textContent = '☀️';
+        themeLabel.textContent = 'Світла тема';
+      }
+      localStorage.setItem('ali_guide_theme', theme);
+    }
+
+    const savedTheme = localStorage.getItem('ali_guide_theme') || 'dark';
+    applyTheme(savedTheme);
+
+    themeToggle.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme');
+      applyTheme(current === 'dark' ? 'light' : 'dark');
+    });
+
+    // 5. Interactive Progress Checkboxes
+    const checkboxes = document.querySelectorAll('.step-checkbox');
+    const progressFill = document.getElementById('progress-fill');
+    const progressText = document.getElementById('progress-text');
+
+    function updateProgress() {
+      let completed = 0;
+      const state = {};
+      checkboxes.forEach(cb => {
+        const stepId = cb.getAttribute('data-step-id');
+        const card = cb.closest('.section-card');
+        if (cb.checked) {
+          completed++;
+          card.classList.add('completed');
+          state[stepId] = true;
+        } else {
+          card.classList.remove('completed');
+          state[stepId] = false;
+        }
+      });
+      const pct = Math.round((completed / checkboxes.length) * 100);
+      progressFill.style.width = pct + '%';
+      progressText.textContent = `Прогрес: ${completed}/${checkboxes.length}`;
+      localStorage.setItem('ali_guide_steps', JSON.stringify(state));
+    }
+
+    try {
+      const savedSteps = JSON.parse(localStorage.getItem('ali_guide_steps') || '{}');
+      checkboxes.forEach(cb => {
+        const id = cb.getAttribute('data-step-id');
+        if (savedSteps[id]) cb.checked = true;
+        cb.addEventListener('change', updateProgress);
+      });
+      updateProgress();
+    } catch (e) {}
+
+    // 6. Calculate user's local time from 09:09 UTC and 14:09 UTC
+    try {
+      const formatLocal = (utcHour, utcMin) => {
+        const d = new Date();
+        d.setUTCHours(utcHour, utcMin, 0, 0);
+        return d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+      };
+      document.getElementById('local-time-1').textContent = `${formatLocal(9, 9)} за вашим часом`;
+      document.getElementById('local-time-2').textContent = `${formatLocal(14, 9)} за вашим часом`;
+    } catch (e) {}
+  </script>
+</body>
+</html>

@@ -9,13 +9,17 @@ on:
   workflow_dispatch:
     # Можливість запустити вручну з вкладки Actions у GitHub
 
+concurrency:
+  group: aliexpress-daily-farm
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   farm:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -32,7 +36,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run AliExpress Farmer (with auto-retry)
+      - name: Run AliExpress Farmer
         env:
           # Пропускаємо довгу паузу при ручному запуску через кнопку
           SKIP_RANDOM_SLEEP: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
@@ -66,17 +70,4 @@ jobs:
           # Сповіщення в Telegram (опційно)
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          max_attempts=3
-          attempt=1
-          until python -m src.main; do
-            exit_code=$?
-            if [ $attempt -ge $max_attempts ]; then
-              echo "❌ Усі $max_attempts спроби завершилися з помилкою."
-              exit $exit_code
-            fi
-            echo "⚠️ Спроба $attempt завершилася невдало. Очікування 60с перед повторним запуском..."
-            sleep 60
-            export SKIP_RANDOM_SLEEP=1
-            attempt=$((attempt + 1))
-          done
+        run: python -m src.main

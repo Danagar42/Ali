@@ -315,7 +315,7 @@ class NotificationDispatcher:
 
         if has_expired:
             lines.extend([
-                "> [!CRITICAL]",
+                "> [!CAUTION]",
                 "> Виявлено акаунти з недійсною або простроченою сесією! Необхідно оновити секрети в репозиторії, щоб уникнути втрати щоденного стріку.",
                 ""
             ])
@@ -794,7 +794,10 @@ class NotificationDispatcher:
                 logger.warning(f"Telegram API повернув помилку: {resp.status_code} - {resp.text}")
                 return False
         except Exception as e:
-            logger.warning(f"Помилка при відправці сповіщення у Telegram: {e}")
+            err_msg = str(e)
+            if self.telegram_bot_token:
+                err_msg = err_msg.replace(self.telegram_bot_token, "***")
+            logger.warning(f"Помилка при відправці сповіщення у Telegram: {err_msg}")
             return False
 
     def dispatch(self, detailed: Optional[bool] = None):

@@ -105,7 +105,11 @@ class CouponCollector:
         self.coupon_records = []
 
         if self.checkin_mgr is not None:
-            if getattr(self.checkin_mgr, "status", None) == "CAPTCHA_REQUIRED" or getattr(self.checkin_mgr, "mobile_status", None) == "CAPTCHA_REQUIRED":
+            if (
+                getattr(self.checkin_mgr, "waf_blocked", False)
+                or getattr(self.checkin_mgr, "status", None) == "CAPTCHA_REQUIRED"
+                or getattr(self.checkin_mgr, "mobile_status", None) == "CAPTCHA_REQUIRED"
+            ):
                 logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF капчу, пропускаємо Coupon Center.")
                 self.coupon_records.append({"id": "Coupon Center", "status": "SKIPPED", "reason": "Пропущено через блокування капчею WAF"})
                 return 0

@@ -3,6 +3,7 @@ import random
 import time
 import json
 import re
+from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional, Set, Tuple
 from src.client import AliClient
 from src.checkin import CheckinManager, _collect_nested_dicts, _clean_int
@@ -57,6 +58,21 @@ SAFE_KEYWORDS = (
     "browse", "view", "explore", "visit", "find",
     "15s", "30s", "15 sec", "секунд", "перегляд", "пошук"
 )
+
+
+def _normalize_task_url(raw_url: Any) -> Optional[str]:
+    if not raw_url or not isinstance(raw_url, str):
+        return None
+    u = raw_url.strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    if not u.startswith(("http://", "https://")):
+        return None
+    parsed = urlparse(u)
+    host = (parsed.hostname or "").lower()
+    if host == "aliexpress.com" or host.endswith(".aliexpress.com"):
+        return u
+    return None
 
 
 def _is_task_already_done(data: Any) -> bool:
@@ -246,6 +262,8 @@ class CoinsFarmManager:
         self.tasks_already_done: int = 0
         self.tasks_skipped: int = 0
         self.tasks_failed: int = 0
+        self.last_complete_coins: int = 0
+        self.last_complete_data: Dict[str, Any] = {}
         self.task_records: List[Dict[str, Any]] = []
 
     @classmethod
@@ -448,7 +466,7 @@ class CoinsFarmManager:
                                     else (
                                         it.get("type")
                                         if it.get("type") is not None
-                                        else cfg.get("type", 0)
+                                        else cfg.get("type")
                                     )
                                 )
                             )
@@ -680,6 +698,10 @@ class CoinsFarmManager:
         if times_limit > 0 and times_joined >= times_limit and not is_claim_only:
             return False, "SKIPPED", f"Всі спроби вичерпано ({times_joined}/{times_limit})"
 
+        # Якщо це готова нагорода для забирання монет
+        if is_claim_only:
+            return True, "CLAIM", "Готово до отримання нагороди"
+
         # Перевірка на небезпечні ключові слова через word boundaries (\b)
         text_repr = " ".join([
             str(task.get("taskTitle", "")),
@@ -696,10 +718,6 @@ class CoinsFarmManager:
         if "daily check" in task_title_lower and not task.get("actionUrl"):
             logger.debug(f"[{self.account_name}] ℹ️ Пропущено 'Daily check-in' без URL перегляду: {task.get('taskTitle')}")
             return False, "SKIPPED", "Щоденний чекін без URL для перегляду"
-
-        # Якщо це готова нагорода для забирання монет
-        if is_claim_only:
-            return True, "CLAIM", "Готово до отримання нагороди"
 
         # Для завдань на перегляд обов'язкова наявність actionUrl
         if not task.get("actionUrl"):
@@ -736,13 +754,18 @@ class CoinsFarmManager:
         self.completed_tasks = 0
         self.task_coins_earned = 0
         self.tasks_completed = 0
+        self.tasks_already_done = 0
         self.tasks_skipped = 0
         self.tasks_failed = 0
         self.task_records = []
 
         # 1. Якщо доступний MTOP шлюз, виконуємо реальні безпечні завдання
         if self.checkin_mgr is not None:
-            if getattr(self.checkin_mgr, "status", None) == "CAPTCHA_REQUIRED" or getattr(self.checkin_mgr, "mobile_status", None) == "CAPTCHA_REQUIRED":
+            if (
+                getattr(self.checkin_mgr, "waf_blocked", False)
+                or getattr(self.checkin_mgr, "status", None) == "CAPTCHA_REQUIRED"
+                or getattr(self.checkin_mgr, "mobile_status", None) == "CAPTCHA_REQUIRED"
+            ):
                 logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF капчу, пропускаємо виконання завдань.")
                 self.status = "SKIPPED"
                 self.tasks_skipped += 1
@@ -800,7 +823,8 @@ class CoinsFarmManager:
                 else:
                     if rec_status in ("ALREADY_DONE", "DONE"):
                         self.tasks_already_done += 1
-                    self.tasks_skipped += 1
+                    else:
+                        self.tasks_skipped += 1
                     t_title = t.get("taskTitle") or f"Завдання {t.get('taskId')}"
                     self.task_records.append({
                         "task_id": str(t.get("taskId") or t.get("taskInstanceId") or "UNKNOWN"),
@@ -875,10 +899,11 @@ class CoinsFarmManager:
                         run_label = f" ({run_idx}/{target_runs})" if target_runs > 1 else ""
                         run_task_id = f"{task_id}_{run_idx}" if target_runs > 1 else task_id
 
-                        if target_url:
-                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {target_url}...")
+                        nav_url = _normalize_task_url(target_url)
+                        if nav_url:
+                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {nav_url}...")
                             try:
-                                self.client.get(target_url)
+                                self.client.get(nav_url)
                             except Exception as e:
                                 logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
                         else:

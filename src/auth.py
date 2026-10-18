@@ -223,10 +223,13 @@ def load_accounts() -> List[AccountConfig]:
         suffix = match.group(1)
         account_name = f"Account_{suffix}"
         raw_val = os.environ[key]
-        parsed = parse_cookie_string(raw_val)
+        if not raw_val or not raw_val.strip():
+            logger.debug(f"Змінна {key} порожня. Пропущено.")
+            continue
 
+        parsed = parse_cookie_string(raw_val)
         if not parsed:
-            logger.warning(f"Змінна {key} порожня або не містить валідних cookies. Пропущено.")
+            logger.warning(f"Змінна {key} не містить валідних cookies. Пропущено.")
             continue
 
         fp = _cookie_fingerprint(parsed)

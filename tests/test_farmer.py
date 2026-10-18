@@ -491,7 +491,7 @@ class TestNotificationsAndStability(unittest.TestCase):
                 self.assertIn("Account_1", summary_md)
                 self.assertIn("🔥 5 дн.", summary_md)
                 self.assertIn("+35 🪙", summary_md)
-                self.assertIn("CRITICAL", summary_md)
+                self.assertIn("CAUTION", summary_md)
 
                 with open(temp_path, "r", encoding="utf-8") as f:
                     file_content = f.read()
@@ -4978,7 +4978,8 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             done = coins_mgr.farm_browse_tasks(count=5)
             self.assertEqual(done, 1)
             self.assertEqual(coins_mgr.tasks_completed, 1)
-            self.assertEqual(coins_mgr.tasks_skipped, 3)
+            self.assertEqual(coins_mgr.tasks_skipped, 2)
+            self.assertEqual(coins_mgr.tasks_already_done, 1)
             self.assertEqual(coins_mgr.tasks_failed, 0)
             self.assertEqual(coins_mgr.task_coins_earned, 5)
 
@@ -5524,6 +5525,371 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             call_text = mock_post.call_args[1]["json"]["text"]
             self.assertIn("Special Deals", call_text)
             self.assertIn("• ✅ <i>Special Deals</i> (+10 🪙)", call_text)
+
+
+
+class TestRefactoringAndBugfixesRegression(unittest.TestCase):
+    """Тести регресії для виправлень та рефакторингу багів."""
+
+    def test_waf_blocked_attribute_and_protection_of_success_status(self):
+        client = AliClient(cookies={"_m_h5_tk": "token_123"})
+        mgr = CheckinManager(client)
+        self.assertFalse(mgr.waf_blocked)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "FAIL_SYS_USER_VALIDATE"
+        mock_resp.json.return_value = {"ret": ["FAIL_SYS_USER_VALIDATE::need verify"]}
+
+        # 1. Protection: if status is SUCCESS, WAF response does NOT overwrite status with CAPTCHA_REQUIRED
+        mgr.status = "SUCCESS"
+        with patch.object(client, "post", return_value=mock_resp):
+            mgr._call_mtop("some.api", data={})
+        self.assertEqual(mgr.status, "SUCCESS")
+        self.assertTrue(mgr.waf_blocked)
+
+        # 2. Protection: if status is ALREADY_DONE, WAF response does NOT overwrite status
+        mgr.waf_blocked = False
+        mgr.status = "ALREADY_DONE"
+        with patch.object(client, "post", return_value=mock_resp):
+            mgr._call_mtop("some.api", data={})
+        self.assertEqual(mgr.status, "ALREADY_DONE")
+        self.assertTrue(mgr.waf_blocked)
+
+        # 3. Non-terminal status gets updated to CAPTCHA_REQUIRED
+        mgr.status = "UNKNOWN"
+        mgr.waf_blocked = False
+        with patch.object(client, "post", return_value=mock_resp):
+            mgr._call_mtop("some.api", data={})
+        self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+        self.assertTrue(mgr.waf_blocked)
+
+        # 4. run_checkin resets waf_blocked to False
+        with patch.object(mgr, "_run_pc_checkin", return_value={"status": "SUCCESS", "coins": 10, "streak": 1}), \
+             patch.object(mgr, "_run_mobile_checkin", return_value={"status": "ALREADY_DONE", "coins": 0, "streak": 1}):
+            mgr.waf_blocked = True
+            mgr.run_checkin()
+            self.assertFalse(mgr.waf_blocked)
+
+    def test_mtop_token_refresh_probe_behavior(self):
+        client = AliClient(cookies={})
+        mgr = CheckinManager(client)
+
+        # Test _refresh_mtop_token directly
+        with patch.object(client.session, "get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            mgr._refresh_mtop_token()
+            mock_get.assert_called_once()
+            self.assertIn("mtop.aliexpress.coin.execute", mock_get.call_args[0][0])
+
+        # Test _call_mtop triggering probe when token is missing
+        client_no_token = AliClient(cookies={})
+        mgr_no_token = CheckinManager(client_no_token)
+        with patch.object(mgr_no_token, "_refresh_mtop_token") as mock_probe, \
+             patch.object(client_no_token, "post") as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"ret": ["SUCCESS::ok"], "data": {"success": True}}
+            )
+
+            def side_effect_probe():
+                client_no_token.session.cookies.set("_m_h5_tk", "refreshed_probe_token")
+            mock_probe.side_effect = side_effect_probe
+
+            mgr_no_token._call_mtop("some.api", data={})
+            mock_probe.assert_called_once()
+
+    def test_is_checkin_success_explicit_ret_failures(self):
+        # Even if data contains misleading keys, ret with FAIL_SYS_* must return False
+        resp_validate = {"ret": ["FAIL_SYS_USER_VALIDATE::need verify"], "data": {"success": True}}
+        self.assertFalse(is_checkin_success(resp_validate))
+
+        resp_expired = {"ret": ["FAIL_SYS_SESSION_EXPIRED::expired"], "data": {"success": True}}
+        self.assertFalse(is_checkin_success(resp_expired))
+
+        resp_token = {"ret": ["FAIL_SYS_TOKEN_EXPIRED::expired"], "data": {"success": True}}
+        self.assertFalse(is_checkin_success(resp_token))
+
+        resp_ok = {"ret": ["SUCCESS::接口调用成功"], "data": {"success": True}}
+        self.assertTrue(is_checkin_success(resp_ok))
+
+    def test_coins_fetch_active_tasks_does_not_default_type_to_zero(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk_123"})
+        mock_checkin = MagicMock()
+        mgr = CoinsFarmManager(client, checkin_mgr=mock_checkin)
+        fake_resp = {
+            "ret": ["SUCCESS::ok"],
+            "data": {
+                "result": [
+                    {"taskId": "1", "taskTitle": "Task 1", "behaviorConfig": {}},
+                    {"taskId": "2", "taskTitle": "Task 2", "behaviorConfig": {"type": 1}}
+                ]
+            }
+        }
+        mock_checkin._call_mtop.return_value = fake_resp
+        tasks = mgr.fetch_active_tasks()
+        self.assertEqual(len(tasks), 2)
+        self.assertIsNone(tasks[0]["rawType"])
+        self.assertEqual(tasks[1]["rawType"], 1)
+
+    def test_coins_classify_task_prioritizes_claim_only(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+        # Task that might match unsafe keywords like 'order' or 'purchase', but is claim only (waitforreceive)
+        task = {
+            "status": "waitforreceive",
+            "taskTitle": "Claim bonus order coins",
+            "unIssueRecord": True
+        }
+        is_safe, action_type, reason = mgr.classify_task(task)
+        self.assertTrue(is_safe)
+        self.assertEqual(action_type, "CLAIM")
+
+    def test_coins_farm_manager_attributes_and_reset(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+        self.assertEqual(mgr.last_complete_coins, 0)
+        self.assertEqual(mgr.last_complete_data, {})
+
+        mgr.tasks_already_done = 10
+        with patch.object(mgr, "fetch_active_tasks", return_value=[]):
+            mgr.farm_browse_tasks()
+            self.assertEqual(mgr.tasks_already_done, 0)
+
+    def test_waf_blocked_skips_downstream_coins_and_coupons(self):
+        client = AliClient(cookies={})
+        mock_checkin = MagicMock()
+        mock_checkin.waf_blocked = True
+
+        coins_mgr = CoinsFarmManager(client, checkin_mgr=mock_checkin)
+        with patch.object(coins_mgr, "fetch_active_tasks") as mock_fetch:
+            coins = coins_mgr.farm_browse_tasks()
+            self.assertEqual(coins, 0)
+            mock_fetch.assert_not_called()
+
+        coupon_mgr = CouponCollector(client, checkin_mgr=mock_checkin)
+        with patch.object(client, "get") as mock_client_get:
+            coupons = coupon_mgr.collect_available_coupons()
+            self.assertEqual(coupons, 0)
+            mock_client_get.assert_not_called()
+
+    def test_normalize_task_url_and_passive_wait_for_invalid_url(self):
+        from src.coins import _normalize_task_url
+        self.assertEqual(_normalize_task_url("//aliexpress.com/item.html"), "https://aliexpress.com/item.html")
+        self.assertEqual(_normalize_task_url("https://aliexpress.com/item.html"), "https://aliexpress.com/item.html")
+        self.assertEqual(_normalize_task_url("http://aliexpress.com/item.html"), "http://aliexpress.com/item.html")
+        self.assertIsNone(_normalize_task_url("aecmd://open?url=test"))
+        self.assertIsNone(_normalize_task_url("javascript:alert(1)"))
+        self.assertIsNone(_normalize_task_url(""))
+
+        # Test passive wait for invalid URL in farm_browse_tasks
+        client = AliClient(cookies={})
+        mock_checkin = MagicMock()
+        mock_checkin.waf_blocked = False
+        mock_checkin.status = "SUCCESS"
+        mock_checkin.mobile_status = "SUCCESS"
+        mock_checkin.session_valid = True
+        mgr = CoinsFarmManager(client, checkin_mgr=mock_checkin)
+        task = {
+            "taskId": "task_1",
+            "taskTitle": "Invalid URL Task",
+            "taskType": "browse",
+            "actionUrl": "aecmd://channel/coins",
+            "staySeconds": 15,
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "completeSuccess": True
+        }
+        with patch.object(mgr, "fetch_active_tasks", return_value=[task]), \
+             patch.object(mgr, "classify_task", return_value=(True, "SAFE_BROWSE", "Ok")), \
+             patch.object(mgr, "_complete_task", return_value=True) as mock_comp, \
+             patch.object(client, "get") as mock_get, \
+             patch.object(client, "sleep_random") as mock_sleep:
+            res = mgr.farm_browse_tasks()
+            mock_get.assert_not_called()
+            mock_sleep.assert_called()
+            mock_comp.assert_called_once()
+
+    def test_env_int_helper_and_safe_parsing(self):
+        from src.config import _env_int
+        with patch.dict(os.environ, {"TEST_INT_VAL": "50"}):
+            self.assertEqual(_env_int("TEST_INT_VAL", 10), 50)
+        with patch.dict(os.environ, {"TEST_INT_VAL": "invalid"}):
+            self.assertEqual(_env_int("TEST_INT_VAL", 10), 10)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_env_int("TEST_INT_VAL", 10), 10)
+
+    def test_client_browser_profile_and_proxy_per_account(self):
+        # Deterministic profile for account
+        c1 = AliClient(cookies={}, account_name="Account_1")
+        c2 = AliClient(cookies={}, account_name="Account_1")
+        self.assertEqual(c1.user_agent, c2.user_agent)
+
+        # Proxy support for Account_1 via ALI_PROXY_1
+        with patch.dict(os.environ, {"ALI_PROXY_1": "http://127.0.0.1:8888"}):
+            c_proxy = AliClient(cookies={}, account_name="Account_1")
+            self.assertEqual(c_proxy.session.proxies.get("http"), "http://127.0.0.1:8888")
+            self.assertEqual(c_proxy.session.proxies.get("https"), "http://127.0.0.1:8888")
+
+    def test_notifications_caution_alert_and_telegram_token_masking(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.add_summary(AccountSummary(
+            name="Acc1",
+            checkin_status="SESSION_EXPIRED",
+            session_valid=False,
+            error_message="Expired"
+        ))
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": "dummy_summary.md"}), \
+             patch("builtins.open", unittest.mock.mock_open()):
+            summary_md = dispatcher.generate_step_summary()
+            self.assertIn("> [!CAUTION]", summary_md)
+            self.assertNotIn("> [!CRITICAL]", summary_md)
+
+        # Telegram token masking
+        dispatcher.telegram_bot_token = "123456:SECRET_BOT_TOKEN_ABC"
+        dispatcher.telegram_chat_id = "fake_chat"
+        with patch("requests.post", side_effect=Exception("Failed to call https://api.telegram.org/bot123456:SECRET_BOT_TOKEN_ABC/sendMessage")), \
+             patch("src.notifications.logger.warning") as mock_log_warn:
+            dispatcher.send_telegram_notification()
+            mock_log_warn.assert_called()
+            logged_msg = mock_log_warn.call_args[0][0]
+            self.assertIn("***", logged_msg)
+            self.assertNotIn("SECRET_BOT_TOKEN_ABC", logged_msg)
+
+    def test_main_sigterm_and_finally_block(self):
+        from src.main import _sigterm_handler, main
+        with self.assertRaises(SystemExit) as cm:
+            _sigterm_handler(15, None)
+        self.assertEqual(cm.exception.code, 143)
+
+        # Test finally block executes report dispatching exactly once
+        with patch("src.main.load_accounts", return_value=[("Acc1", {"aep_usuc_f": "region=KR"})]), \
+             patch("src.main.initial_random_jitter"), \
+             patch("src.main.AliClient.sleep_random"), \
+             patch("src.main.CheckinManager") as mock_chk_cls, \
+             patch("src.main.CoinsFarmManager") as mock_coins_cls, \
+             patch("src.main.CouponCollector") as mock_coup_cls, \
+             patch("src.main.NotificationDispatcher") as mock_disp_cls:
+            mock_disp = mock_disp_cls.return_value
+            mock_chk = mock_chk_cls.return_value
+            mock_chk.status = "SUCCESS"
+            mock_chk.pc_status = "SUCCESS"
+            mock_chk.mobile_status = "SUCCESS"
+            mock_chk.coins_earned = 10
+            mock_chk.pc_coins = 10
+            mock_chk.mobile_coins = 0
+            mock_chk.current_streak = 2
+            mock_chk.total_coins = 100
+            mock_chk.waf_blocked = False
+            mock_chk.session_valid = True
+
+            mock_coins = mock_coins_cls.return_value
+            mock_coins.tasks_done = 1
+            mock_coins.tasks_coins = 5
+            mock_coins.task_details = []
+
+            mock_coup = mock_coup_cls.return_value
+            mock_coup.coupons_collected = 0
+            mock_coup.coupon_records = []
+
+            main()
+            mock_disp.dispatch.assert_called_once()
+
+    def test_mobile_channel_halts_immediately_on_waf_when_pc_succeeded(self):
+        client = AliClient(cookies={"_m_h5_tk": "tk123_456"})
+        mgr = CheckinManager(client)
+
+        # 1. PC succeeds
+        pc_mock = {"status": "SUCCESS", "coins": 10, "streak": 3}
+        with patch.object(mgr, "_run_pc_checkin", return_value=pc_mock):
+            # 2. In Mobile channel, MOBILE_SIGN_LIST_API hits WAF slider challenge
+            waf_mtop_resp = {
+                "ret": ["FAIL_SYS_USER_VALIDATE::need verify"],
+                "data": {"url": "https://sec.aliexpress.com/verify"}
+            }
+
+            mtop_calls = []
+            def fake_call_mtop(api, *args, **kwargs):
+                mtop_calls.append(api)
+                if api == MOBILE_SIGN_LIST_API:
+                    mgr.waf_blocked = True
+                    return waf_mtop_resp
+                return {"ret": ["SUCCESS::ok"], "data": {}}
+
+            with patch.object(mgr, "_call_mtop", side_effect=fake_call_mtop):
+                res = mgr.run_checkin()
+                self.assertTrue(res)
+                # Verify PC status preserved as SUCCESS, mobile status is CAPTCHA_REQUIRED
+                self.assertEqual(mgr.status, "SUCCESS")
+                self.assertEqual(mgr.pc_status, "SUCCESS")
+                self.assertEqual(mgr.mobile_status, "CAPTCHA_REQUIRED")
+                self.assertTrue(mgr.waf_blocked)
+
+                # Verify mobile channel halted immediately on MOBILE_SIGN_LIST_API without runaway queries!
+                self.assertEqual(mtop_calls, [MOBILE_SIGN_LIST_API])
+
+        # 3. Verify NotificationDispatcher detects CAPTCHA_REQUIRED from mobile_status
+        from src.notifications import NotificationDispatcher, AccountSummary
+        disp = NotificationDispatcher()
+        disp.add_summary(AccountSummary(
+            name="Acc1",
+            checkin_status=mgr.status,
+            pc_status=mgr.pc_status,
+            mobile_status=mgr.mobile_status,
+            session_valid=True
+        ))
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": "dummy.md"}), \
+             patch("builtins.open", unittest.mock.mock_open()):
+            summary_content = disp.generate_step_summary()
+            self.assertIn("Капча", summary_content)
+
+    def test_pc_warmup_sets_waf_blocked(self):
+        client = AliClient(cookies={})
+        mgr = CheckinManager(client)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><script>rgv587_run_script</script></html>"
+
+        with patch.object(client, "get", return_value=mock_resp):
+            pc_res = mgr._run_pc_checkin()
+            self.assertEqual(pc_res["status"], "CAPTCHA_REQUIRED")
+            self.assertTrue(mgr.waf_blocked)
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
+
+    def test_fetch_coin_balance_skipped_when_waf_blocked(self):
+        client = AliClient(cookies={})
+        mgr = CheckinManager(client)
+        mgr.waf_blocked = True
+
+        with patch.object(mgr, "_call_mtop") as mock_mtop:
+            mgr._fetch_coin_balance()
+            mock_mtop.assert_not_called()
+
+    def test_tasks_already_done_not_double_counted_in_tasks_skipped(self):
+        client = AliClient(cookies={})
+        mock_checkin = MagicMock()
+        mock_checkin.waf_blocked = False
+        mock_checkin.status = "SUCCESS"
+        mock_checkin.mobile_status = "SUCCESS"
+        mock_checkin.session_valid = True
+        mgr = CoinsFarmManager(client, checkin_mgr=mock_checkin)
+
+        tasks = [
+            {"taskId": "t1", "taskTitle": "Done task"},
+            {"taskId": "t2", "taskTitle": "Skipped task"}
+        ]
+
+        def fake_classify(t):
+            if t["taskId"] == "t1":
+                return False, "ALREADY_DONE", "Already done"
+            return False, "SKIPPED", "Skipped"
+
+        with patch.object(mgr, "fetch_active_tasks", return_value=tasks), \
+             patch.object(mgr, "classify_task", side_effect=fake_classify):
+            mgr.farm_browse_tasks()
+            self.assertEqual(mgr.tasks_already_done, 1)
+            self.assertEqual(mgr.tasks_skipped, 1)  # NOT 2!
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from src.auth import parse_cookie_string
 from src.config import (
+    BROWSER_PROFILES,
     get_random_browser_profile,
     get_client_hints_for_ua,
     REQUEST_DELAY_MIN,
@@ -62,8 +63,13 @@ class AliClient:
         for k, v in cookie_dict.items():
             self.session.cookies.set(k, v, domain=".aliexpress.com", path="/")
 
-        # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або глобальної ALI_PROXY
-        resolved_proxy = proxy or os.getenv(f"ALI_PROXY_{account_name}") or os.getenv("ALI_PROXY")
+        # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або ALI_PROXY_{suffix}, або глобальної ALI_PROXY
+        resolved_proxy = (
+            proxy
+            or os.getenv(f"ALI_PROXY_{account_name}")
+            or os.getenv(f"ALI_PROXY_{account_name.removeprefix('Account_')}")
+            or os.getenv("ALI_PROXY")
+        )
         if resolved_proxy:
             self.session.proxies.update({
                 "http": resolved_proxy,
@@ -75,7 +81,11 @@ class AliClient:
             self.user_agent = user_agent
             self.client_hints = client_hints if client_hints is not None else get_client_hints_for_ua(user_agent)
         else:
-            self.user_agent, profile_hints = get_random_browser_profile()
+            if account_name == "Default":
+                self.user_agent, profile_hints = get_random_browser_profile()
+            else:
+                profile = random.Random(account_name).choice(BROWSER_PROFILES)
+                self.user_agent, profile_hints = profile["user_agent"], dict(profile["client_hints"])
             self.client_hints = client_hints if client_hints is not None else profile_hints
 
         self._ensure_region_kr()

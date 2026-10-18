@@ -5,61 +5,61 @@ from typing import Dict, Tuple, List, Optional, Any
 # Набір реалістичних профілів браузерів із відповідними Client Hints
 BROWSER_PROFILES: List[Dict[str, Any]] = [
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "client_hints": {
-            "sec-ch-ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+            "sec-ch-ua": '"Google Chrome";v="140", "Not=A?Brand";v="8", "Chromium";v="140"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
         }
     },
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
         "client_hints": {
-            "sec-ch-ua": '"Google Chrome";v="128", "Not=A?Brand";v="8", "Chromium";v="128"',
+            "sec-ch-ua": '"Google Chrome";v="138", "Not=A?Brand";v="8", "Chromium";v="138"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
         }
     },
     {
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "client_hints": {
-            "sec-ch-ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+            "sec-ch-ua": '"Google Chrome";v="140", "Not=A?Brand";v="8", "Chromium";v="140"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
         }
     },
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
         "client_hints": {}  # Firefox не надсилає sec-ch-ua заголовки
     },
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0",
         "client_hints": {
-            "sec-ch-ua": '"Microsoft Edge";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+            "sec-ch-ua": '"Microsoft Edge";v="138", "Not=A?Brand";v="8", "Chromium";v="138"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
         }
     },
     {
-        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "client_hints": {
-            "sec-ch-ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+            "sec-ch-ua": '"Google Chrome";v="140", "Not=A?Brand";v="8", "Chromium";v="140"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Linux"',
         }
     },
     {
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
         "client_hints": {}  # Safari не надсилає sec-ch-ua
     },
     {
-        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
         "client_hints": {}  # Mobile Safari не надсилає sec-ch-ua
     },
     {
-        "user_agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.70 Mobile Safari/537.36",
+        "user_agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.6668.70 Mobile Safari/537.36",
         "client_hints": {
-            "sec-ch-ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+            "sec-ch-ua": '"Google Chrome";v="138", "Not=A?Brand";v="8", "Chromium";v="138"',
             "sec-ch-ua-mobile": "?1",
             "sec-ch-ua-platform": '"Android"',
         }
@@ -107,12 +107,22 @@ REQUEST_DELAY_MAX = 5.5
 # Визначення середовища виконання
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
 
+def _env_int(name: str, default: int) -> int:
+    """Безпечно парсить цілочисельне значення зі змінної оточення."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return int(str(val).strip())
+    except (ValueError, TypeError):
+        return default
+
 # Налаштування початкового рандомного зсуву часу:
 # У CI за замовчуванням обмежуємо 180 сек (3 хв), щоб не спалювати ліміти GitHub Actions;
 # Локально/за розкладом — до 1800 сек (30 хв).
 SKIP_RANDOM_SLEEP = os.getenv("SKIP_RANDOM_SLEEP", "0").lower() in ("1", "true", "yes")
-_default_max_sleep = "180" if IS_CI else "1800"
-MAX_START_SLEEP_SECONDS = int(os.getenv("MAX_START_SLEEP_SECONDS", _default_max_sleep))
+_default_max_sleep = 180 if IS_CI else 1800
+MAX_START_SLEEP_SECONDS = _env_int("MAX_START_SLEEP_SECONDS", _default_max_sleep)
 
 # Базові налаштування AliExpress
 ALIEXPRESS_COIN_PAGE = "https://www.aliexpress.com/p/coin-pc-index/index.html"
@@ -128,10 +138,7 @@ ASAC_CAMPAIGN = "2E227052O27XFLCLMIUIOA"
 ASAC_MOBILE_CAMPAIGN = "2E2280406IM61M8MG1F2FB"
 
 # Інтерактивна платформа завдань AliExpress (Coin Tasks)
-try:
-    TASK_SCENE_ID = int(os.getenv("TASK_SCENE_ID", "149"))
-except (ValueError, TypeError):
-    TASK_SCENE_ID = 149
+TASK_SCENE_ID = _env_int("TASK_SCENE_ID", 149)
 TASK_APP_KEY = os.getenv("TASK_APP_KEY", "llcvfnh8tuknrw80cgstljy4h2y7i1rh")
 PROJECT_APP_KEY = os.getenv("PROJECT_APP_KEY", os.getenv("TASK_APP_KEY", "llcvfnh8tuknrw80cgstljy4h2y7i1rh"))
 ASAC_TASK_CAMPAIGN = os.getenv("ASAC_TASK_CAMPAIGN", "2E247188QJLF705B9VMWWJ")
@@ -147,5 +154,5 @@ TASK_UMID_TOKEN = os.getenv("TASK_UMID_TOKEN", "T2gA1jIALVYecdoa1onvC24McgCfk9c4
 TASK_BX_UMIDTOKEN = os.getenv("TASK_BX_UMIDTOKEN", "T2gAJf8iJkyJCy1iYOyIw3Mx_GChuoEw_ds8gFo3GJfC_qzqm2SJRF4_f2cB9u2NtoI=")
 TASK_MTOP_APP_KEY = os.getenv("TASK_MTOP_APP_KEY", "24815441")
 TASK_PLATFORM_CANDIDATES = ["android", "wireless", "h5", "app", "iOS"]
-MAX_SAFE_TASKS_PER_RUN = int(os.getenv("MAX_SAFE_TASKS_PER_RUN", "15"))
+MAX_SAFE_TASKS_PER_RUN = _env_int("MAX_SAFE_TASKS_PER_RUN", 15)
 

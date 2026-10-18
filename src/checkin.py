@@ -492,6 +492,11 @@ def is_checkin_success(res_data: Any) -> bool:
 
     res_data = json_data
 
+    ret = res_data.get("ret")
+    ret_first = ret[0] if (isinstance(ret, list) and len(ret) > 0) else (ret if isinstance(ret, str) else "")
+    if isinstance(ret_first, str) and ret_first and not (ret_first.startswith("SUCCESS::") or ret_first == "SUCCESS"):
+        return False
+
     # Перевірка на явний прапорець невдачі на верхніх рівнях
     if res_data.get("success") is False or res_data.get("signSuccess") is False:
         return False
@@ -573,6 +578,7 @@ class CheckinManager:
         self.client = client
         self.account_name = client.account_name
         self.status = "FAILED"  # SUCCESS, ALREADY_DONE, SESSION_EXPIRED, FAILED, CAPTCHA_REQUIRED
+        self.waf_blocked: bool = False
         self.streak_days = 0
         self.coins_earned = 0
         self.total_coins: Optional[int] = None
@@ -781,6 +787,19 @@ class CheckinManager:
             mtop_params["platform"] = platform_val
         return mtop_params
 
+    def _refresh_mtop_token(self):
+        """Очищує старий _m_h5_tk (якщо треба) та виконує probe-запит для отримання свіжого токена."""
+        try:
+            probe_url = "https://acs.aliexpress.com/h5/mtop.aliexpress.coin.execute/1.0/"
+            self.client.session.get(
+                probe_url,
+                params={"api": "mtop.aliexpress.coin.execute", "v": "1.0", "data": "{}"},
+                headers={"Referer": COIN_PC_REFERER, "Origin": ORIGIN},
+                timeout=10
+            )
+        except Exception as e:
+            logger.debug(f"[{self.account_name}] MTOP probe запит: {e}")
+
     def _call_mtop(
         self,
         api: str,
@@ -825,18 +844,10 @@ class CheckinManager:
 
         # Якщо токен ще відсутній у сесії, виконуємо probe-запит для отримання _m_h5_tk від шлюзу
         if not self.client.get_cookie("_m_h5_tk"):
-            try:
-                probe_url = "https://acs.aliexpress.com/h5/mtop.aliexpress.coin.execute/1.0/"
-                self.client.session.get(
-                    probe_url,
-                    params={"api": "mtop.aliexpress.coin.execute", "v": "1.0", "data": "{}"},
-                    headers={"Referer": COIN_PC_REFERER, "Origin": ORIGIN},
-                    timeout=10
-                )
-            except Exception as e:
-                logger.debug(f"[{self.account_name}] MTOP probe запит: {e}")
+            self._refresh_mtop_token()
 
         for attempt in range(max_retries):
+            token_before = self.client.get_cookie("_m_h5_tk")
             params = self._prepare_mtop_params(api=api, data=data)
             if not params:
                 logger.warning(f"[{self.account_name}] ⚠️ Не вдалося сформувати підпис MTOP для {api}: у cookies відсутній обов'язковий токен '_m_h5_tk'!")
@@ -857,7 +868,9 @@ class CheckinManager:
                     headers=headers
                 )
                 if resp is not None and is_captcha_required(resp):
-                    self.status = "CAPTCHA_REQUIRED"
+                    self.waf_blocked = True
+                    if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                        self.status = "CAPTCHA_REQUIRED"
                     logger.warning(f"[{self.account_name}] 🧩 Виявлено вимогу проходження капчі (WAF) у тексті відповіді!")
                     return None
 
@@ -871,15 +884,19 @@ class CheckinManager:
                 if isinstance(res_data, dict) and "api" not in res_data:
                     res_data["api"] = api
 
-                logger.info(f"[{self.account_name}] Відповідь від {url}: {res_data}")
+                logger.debug(f"[{self.account_name}] Відповідь від {url}: {res_data}")
 
                 if is_captcha_required(res_data):
-                    self.status = "CAPTCHA_REQUIRED"
+                    self.waf_blocked = True
+                    if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                        self.status = "CAPTCHA_REQUIRED"
                     logger.warning(f"[{self.account_name}] 🧩 Виявлено вимогу проходження капчі (WAF) у JSON відповіді!")
                     return res_data
 
                 if is_mtop_token_expired(res_data) and attempt < max_retries - 1:
                     logger.info(f"[{self.account_name}] 🔄 Отримано FAIL_SYS_TOKEN_EXPIRED для {api}. Оновлюємо токен та повторюємо спробу...")
+                    if self.client.get_cookie("_m_h5_tk") == token_before:
+                        self._refresh_mtop_token()
                     continue
 
                 return res_data
@@ -1242,6 +1259,7 @@ class CheckinManager:
         try:
             home_resp = self.client.get(COIN_PC_REFERER)
             if home_resp and is_captcha_required(home_resp):
+                self.waf_blocked = True
                 self.status = "CAPTCHA_REQUIRED"
                 logger.warning(f"[{self.account_name}] 🧩 Сторінка PC Index вимагає капчі WAF!")
                 pc_result["status"] = "CAPTCHA_REQUIRED"
@@ -1385,14 +1403,16 @@ class CheckinManager:
         logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Запит статусу чекіну до {MOBILE_SIGN_LIST_API}...")
         list_res = self._call_mtop(MOBILE_SIGN_LIST_API)
 
-        if self.status == "CAPTCHA_REQUIRED":
+        if self.waf_blocked or self.status == "CAPTCHA_REQUIRED":
             mobile_result["status"] = "CAPTCHA_REQUIRED"
             return mobile_result
 
         # Перевірка на капчу та сесію ПЕРЕД fallback-запитом
         if list_res:
             if is_captcha_required(list_res):
-                self.status = "CAPTCHA_REQUIRED"
+                self.waf_blocked = True
+                if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                    self.status = "CAPTCHA_REQUIRED"
                 logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {MOBILE_SIGN_LIST_API} вимагає капчі (WAF)!")
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
@@ -1408,12 +1428,14 @@ class CheckinManager:
         if not list_res or (not _find_mobile_daily_sign_node(list_res)[0] and not is_already_checked_in(list_res)):
             logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Спроба допоміжного запиту списку через {MOBILE_SIGN_QUERY_LIST_API}...")
             query_res = self._call_mtop(MOBILE_SIGN_QUERY_LIST_API)
-            if self.status == "CAPTCHA_REQUIRED":
+            if self.waf_blocked or self.status == "CAPTCHA_REQUIRED":
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
             if query_res:
                 if is_captcha_required(query_res):
-                    self.status = "CAPTCHA_REQUIRED"
+                    self.waf_blocked = True
+                    if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                        self.status = "CAPTCHA_REQUIRED"
                     mobile_result["status"] = "CAPTCHA_REQUIRED"
                     return mobile_result
                 if is_session_expired(query_res):
@@ -1461,13 +1483,15 @@ class CheckinManager:
         logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Виконання чекіну через {MOBILE_SIGN_EXECUTE_API}...")
         exec_res = self._call_mtop(MOBILE_SIGN_EXECUTE_API)
 
-        if self.status == "CAPTCHA_REQUIRED":
+        if self.waf_blocked or self.status == "CAPTCHA_REQUIRED":
             mobile_result["status"] = "CAPTCHA_REQUIRED"
             return mobile_result
 
         if exec_res:
             if is_captcha_required(exec_res):
-                self.status = "CAPTCHA_REQUIRED"
+                self.waf_blocked = True
+                if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                    self.status = "CAPTCHA_REQUIRED"
                 logger.warning(f"[{self.account_name}] 🧩 [Канал Mobile] {MOBILE_SIGN_EXECUTE_API} повернув вимогу капчі (WAF)!")
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
@@ -1524,13 +1548,15 @@ class CheckinManager:
                 continue
             logger.debug(f"[{self.account_name}] 📱 [Канал Mobile] Спроба fallback ендпоінту {api}...")
             res = self._call_mtop(api)
-            if self.status == "CAPTCHA_REQUIRED":
+            if self.waf_blocked or self.status == "CAPTCHA_REQUIRED":
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
             if not res:
                 continue
             if is_captcha_required(res):
-                self.status = "CAPTCHA_REQUIRED"
+                self.waf_blocked = True
+                if self.status not in ("SUCCESS", "ALREADY_DONE"):
+                    self.status = "CAPTCHA_REQUIRED"
                 mobile_result["status"] = "CAPTCHA_REQUIRED"
                 return mobile_result
             if is_session_expired(res):
@@ -1600,6 +1626,7 @@ class CheckinManager:
         """
         logger.info(f"[{self.account_name}] 🔄 Початок щоденного чекіну (Dual-Channel: PC + Mobile)...")
         self.coins_earned = 0
+        self.waf_blocked = False
         self.status = "FAILED"
         self.pc_status = "FAILED"
         self.mobile_status = "FAILED"
@@ -1634,7 +1661,7 @@ class CheckinManager:
         mobile_streak = mobile_res.get("streak", 0)
 
         # Якщо на мобільному спрацювала капча
-        if mobile_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
+        if self.waf_blocked or mobile_res.get("status") == "CAPTCHA_REQUIRED" or self.status == "CAPTCHA_REQUIRED":
             self.pc_status = pc_status
             self.mobile_status = "CAPTCHA_REQUIRED"
             self.pc_coins = pc_coins if pc_status in ("SUCCESS", "ALREADY_DONE") else 0
@@ -1705,7 +1732,8 @@ class CheckinManager:
         )
 
         # 6. Отримання точного балансу монет через mtop.aliexpress.coin.execute
-        self._fetch_coin_balance()
+        if not self.waf_blocked:
+            self._fetch_coin_balance()
         if self.total_coins is not None:
             self.final_coins = self.total_coins
             fresh_checkin_coins = 0
@@ -1720,6 +1748,9 @@ class CheckinManager:
 
     def _fetch_coin_balance(self):
         """Отримує точний баланс монет через mtop.aliexpress.coin.execute (scene: 'UserCoinNum')."""
+        if self.waf_blocked:
+            logger.debug(f"[{self.account_name}] WAF блокування активне — пропускаємо _fetch_coin_balance.")
+            return
         exec_payload = {"scene": "UserCoinNum"}
         exec_res = self._call_mtop("mtop.aliexpress.coin.execute", data=exec_payload)
         if exec_res and isinstance(exec_res, dict):
