@@ -277,7 +277,6 @@ class NotificationDispatcher:
         total_coins_earned = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in self.summaries)
         total_checkin_coins = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in self.summaries)
         total_tasks_coins = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in self.summaries)
-        total_coupons = sum(int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0 for s in self.summaries)
         total_tasks_done = sum(int(s.tasks_done) if isinstance(s.tasks_done, (int, float)) else 0 for s in self.summaries)
         has_expired = any(
             not s.session_valid
@@ -307,8 +306,7 @@ class NotificationDispatcher:
             "",
             f"> **Статус обробки:** {status_text} | "
             f"**Акаунтів:** {successful_accounts}/{total_accounts} | "
-            f"**Зароблено монет сьогодні:** +{total_coins_earned} 🪙 | "
-            f"**Купонів зібрано:** {total_coupons} 🎟️",
+            f"**Зароблено монет сьогодні:** +{total_coins_earned} 🪙",
             f"> **Деталізація нагород:** 🪙 Чекін: +{total_checkin_coins} 🪙 | 🛍️ Завдання: +{total_tasks_coins} 🪙 ({total_tasks_done} вик.)",
             ""
         ]
@@ -330,8 +328,8 @@ class NotificationDispatcher:
         lines.extend([
             "### 📊 Результати по акаунтах",
             "",
-            "| Акаунт | Чекін | Стрік | Сьогодні | Всього монет | Таски | Купони | Сесія |",
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+            "| Акаунт | Чекін | Стрік | Сьогодні | Всього монет | Таски | Сесія |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
         ])
 
         for s in self.summaries:
@@ -354,10 +352,9 @@ class NotificationDispatcher:
             else:
                 total_str = "-"
             tasks_str = str(s.tasks_done)
-            coupons_str = str(s.coupons_claimed)
             safe_name = html.escape(str(s.name or "Account")).replace("|", "\\|")
             lines.append(
-                f"| **{safe_name}** | {self._checkin_icon(s.checkin_status)} | {streak_str} | {earned_str} | {total_str} | {tasks_str} | {coupons_str} | {self._session_icon(s.session_valid)} |"
+                f"| **{safe_name}** | {self._checkin_icon(s.checkin_status)} | {streak_str} | {earned_str} | {total_str} | {tasks_str} | {self._session_icon(s.session_valid)} |"
             )
 
         lines.append("")
@@ -455,30 +452,6 @@ class NotificationDispatcher:
                     lines.append(f"| **{safe_name}** | Завдання платформи | ℹ️ Немає | - | Завдання не виконувалися |")
             lines.append("")
 
-        # 3. Деталізація купонів (якщо є спроби/збір)
-        has_coupon_records = any(bool(s.coupon_details) for s in self.summaries)
-        has_coupons_done = any(isinstance(s.coupons_claimed, (int, float)) and s.coupons_claimed > 0 for s in self.summaries)
-        if has_coupon_records or has_coupons_done:
-            lines.extend([
-                "### 🎟️ Деталізація зібраних купонів",
-                "",
-                "| Акаунт | Кампанія / Купон | Статус | Результат |",
-                "| :--- | :--- | :---: | :--- |"
-            ])
-            for s in self.summaries:
-                safe_name = html.escape(str(s.name or "Account")).replace("|", "\\|")
-                if s.coupon_details and isinstance(s.coupon_details, list):
-                    for c in s.coupon_details:
-                        if not isinstance(c, dict):
-                            continue
-                        c_id = html.escape(str(c.get("id", "Купон"))).replace("|", "\\|")
-                        c_status = "✅ Зібрано" if c.get("status") == "SUCCESS" else ("ℹ️ Вже зібрано" if c.get("status") == "ALREADY_DONE" else "⚠️ Пропущено/Збій")
-                        c_reason = html.escape(str(c.get("reason", "-"))).replace("|", "\\|")
-                        lines.append(f"| **{safe_name}** | {c_id} | {c_status} | {c_reason} |")
-                elif isinstance(s.coupons_claimed, (int, float)) and s.coupons_claimed > 0:
-                    lines.append(f"| **{safe_name}** | Промо-купони ({s.coupons_claimed}) | ✅ Зібрано | Успішно отримано в Coupon Center |")
-            lines.append("")
-
         content = "\n".join(lines)
 
         try:
@@ -516,7 +489,6 @@ class NotificationDispatcher:
         total_coins = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in self.summaries)
         total_checkin_coins = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in self.summaries)
         total_tasks_coins = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in self.summaries)
-        total_coupons = sum(int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0 for s in self.summaries)
         has_expired = any(
             not s.session_valid
             or s.checkin_status == "SESSION_EXPIRED"
@@ -559,9 +531,6 @@ class NotificationDispatcher:
         if total_checkin_coins > 0 or total_tasks_coins > 0:
             coins_line += f" <i>(чекін: +{total_checkin_coins}, таски: +{total_tasks_coins})</i>"
         msg_lines.append(coins_line)
-
-        if total_coupons > 0:
-            msg_lines.append(f"🎟️ Купонів зібрано: <b>{total_coupons}</b>")
         msg_lines.append("")
 
         for s in self.summaries:
@@ -735,28 +704,6 @@ class NotificationDispatcher:
                             sub_lines.append(f"     • ⚠️ <i>{t_title}</i> ({t_r})")
                     if len(sorted_details) > len(shown_tasks):
                         sub_lines.append(f"     • <i>...ще {len(sorted_details) - len(shown_tasks)} завдань</i>")
-
-            # 4. Купони
-            coupons_v = int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0
-            if coupons_v > 0:
-                sub_lines.append(f"   🎟️ Купони: <b>{coupons_v}</b> зібрано")
-                if is_detailed and s.coupon_details and isinstance(s.coupon_details, list):
-                    for c in s.coupon_details[:3]:
-                        if isinstance(c, dict) and c.get("status") == "SUCCESS":
-                            c_name = html.escape(str(c.get("id", "Купон")))
-                            sub_lines.append(f"     • 🎟️ <i>{c_name}</i> (✅ отримано)")
-            elif is_detailed and s.coupon_details and isinstance(s.coupon_details, list):
-                valid_coupons = [c for c in s.coupon_details if isinstance(c, dict)]
-                if any(c.get("status") == "FAILED" for c in valid_coupons):
-                    f_reason = next((c.get("reason") for c in valid_coupons if c.get("status") == "FAILED" and c.get("reason")), "Збій")
-                    sub_lines.append(f"   🎟️ Купони: ⚠️ Не отримано ({html.escape(str(f_reason))})")
-                elif valid_coupons and all(c.get("status") == "ALREADY_DONE" for c in valid_coupons):
-                    sub_lines.append("   🎟️ Купони: ℹ️ Всі доступні купони вже отримано")
-                elif any(c.get("status") == "ALREADY_DONE" for c in valid_coupons):
-                    sub_lines.append("   🎟️ Купони: ℹ️ Доступні купони вже отримано раніше")
-                elif any(c.get("status") == "SKIPPED" for c in valid_coupons):
-                    sk_reason = next((c.get("reason") for c in valid_coupons if c.get("reason")), "Пропущено")
-                    sub_lines.append(f"   🎟️ Купони: ⏭️ Пропущено ({html.escape(str(sk_reason))})")
 
             if sub_lines:
                 msg_lines.extend(sub_lines)

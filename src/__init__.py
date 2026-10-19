@@ -1,1 +1,1 @@
-"""AliExpress Coin & Coupon Farmer package."""
+"""AliExpress Coin Farmer package."""

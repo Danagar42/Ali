@@ -49,7 +49,6 @@ from src.checkin import (
     _extract_node_streak
 )
 from src.coins import CoinsFarmManager, REPORT_TASK_URLS, _extract_coins_from_complete_result
-from src.coupons import CouponCollector
 import src.main as main_module
 
 
@@ -195,7 +194,7 @@ class TestCheckin(unittest.TestCase):
             self.assertTrue(success)
 
 
-class TestCoinsAndCoupons(unittest.TestCase):
+class TestCoinsTasks(unittest.TestCase):
     @patch("src.client.AliClient.sleep_random")
     def test_coins_farm_browse_tasks(self, mock_sleep):
         client = AliClient(cookies={"sid": "test"})
@@ -223,25 +222,6 @@ class TestCoinsAndCoupons(unittest.TestCase):
             self.assertEqual(called_payload["channel"], "COIN")
             self.assertIn("taskId", called_payload)
 
-    @patch("src.client.AliClient.sleep_random")
-    def test_coupon_collector_with_extracted_candidates(self, mock_sleep):
-        client = AliClient(cookies={"sid": "test"})
-        collector = CouponCollector(client)
-
-        mock_html = '<html><div data-id="1" couponId="CPN_999" activityId="ACT_888"></div></html>'
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200
-        mock_get_resp.text = mock_html
-
-        mock_post_resp = MagicMock()
-        mock_post_resp.status_code = 200
-        mock_post_resp.json.return_value = {"ret": ["SUCCESS"]}
-
-        with patch.object(client, "get", return_value=mock_get_resp), \
-             patch.object(client, "post", return_value=mock_post_resp) as mock_post:
-            collector.collect_available_coupons()
-            self.assertTrue(mock_post.called)
-
 
 class TestMainErrorHandling(unittest.TestCase):
     @patch("src.main.initial_random_jitter")
@@ -253,10 +233,9 @@ class TestMainErrorHandling(unittest.TestCase):
     }, clear=True)
     @patch("src.main.CheckinManager")
     @patch("src.main.CoinsFarmManager")
-    @patch("src.main.CouponCollector")
     @patch("src.client.AliClient.sleep_random")
     def test_main_loop_isolation_one_failing_does_not_stop_next(
-        self, mock_sleep_random, mock_coupons, mock_coins, mock_checkin, mock_time_sleep, mock_jitter
+        self, mock_sleep_random, mock_coins, mock_checkin, mock_time_sleep, mock_jitter
     ):
         # Account 1 raises an exception in CheckinManager
         def side_effect(client):
@@ -324,8 +303,7 @@ class TestMainErrorHandling(unittest.TestCase):
     @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
     @patch("src.main.CheckinManager")
     @patch("src.main.CoinsFarmManager")
-    @patch("src.main.CouponCollector")
-    def test_main_exits_when_zero_successful_actions(self, mock_coupons, mock_coins, mock_checkin, mock_jitter):
+    def test_main_exits_when_zero_successful_actions(self, mock_coins, mock_checkin, mock_jitter):
         instance_checkin = MagicMock()
         instance_checkin.run_checkin.return_value = False  # Checkin failed
         mock_checkin.return_value = instance_checkin
@@ -391,22 +369,6 @@ class TestMainErrorHandling(unittest.TestCase):
         c1 = {"xman_us_f": "user123", "_m_h5_tk": "tokenabc_1700000000", "isg": "hash1"}
         c2 = {"xman_us_f": "user123", "_m_h5_tk": "tokenabc_1700999999", "isg": "hash2"}
         self.assertEqual(_cookie_fingerprint(c1), _cookie_fingerprint(c2))
-
-    def test_coupon_extractor_unquoted_js(self):
-        collector = CouponCollector(AliClient(cookies={}))
-        html = """
-        <script>
-            window.pageData = {
-                activityId: 'ACT_UNQUOTED_123',
-                couponId: 'CPN_UNQUOTED_456'
-            };
-        </script>
-        """
-        candidates = collector._extract_coupon_candidates(html)
-        act_ids = [c.get("activityId") for c in candidates if "activityId" in c]
-        cpn_ids = [c.get("couponId") for c in candidates if "couponId" in c]
-        self.assertIn("ACT_UNQUOTED_123", act_ids)
-        self.assertIn("CPN_UNQUOTED_456", cpn_ids)
 
 
 class TestNotificationsAndStability(unittest.TestCase):
@@ -476,7 +438,6 @@ class TestNotificationsAndStability(unittest.TestCase):
                     streak_days=5,
                     total_coins=1200,
                     tasks_done=4,
-                    coupons_claimed=1,
                     session_valid=True
                 ))
                 dispatcher.add_summary(AccountSummary(
@@ -827,11 +788,9 @@ class TestModernCheckinAndRegionalCompatibility(unittest.TestCase):
 class TestAuditFixesAndOptimizations(unittest.TestCase):
     def setUp(self):
         CoinsFarmManager.reset_dead_urls()
-        CouponCollector.reset_dead_endpoints()
 
     def tearDown(self):
         CoinsFarmManager.reset_dead_urls()
-        CouponCollector.reset_dead_endpoints()
 
     # --- Task 1: Failure Masking Fix ---
 
@@ -839,9 +798,8 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
     @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
     @patch("src.main.CheckinManager")
     @patch("src.main.CoinsFarmManager")
-    @patch("src.main.CouponCollector")
     def test_main_exits_with_error_when_checkin_fails_even_if_browse_tasks_done(
-        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+        self, mock_coins, mock_checkin, mock_jitter
     ):
         instance_checkin = MagicMock()
         instance_checkin.run_checkin.return_value = False  # Checkin failed
@@ -861,9 +819,8 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
     @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
     @patch("src.main.CheckinManager")
     @patch("src.main.CoinsFarmManager")
-    @patch("src.main.CouponCollector")
     def test_main_succeeds_when_checkin_ok_and_session_valid(
-        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+        self, mock_coins, mock_checkin, mock_jitter
     ):
         instance_checkin = MagicMock()
         instance_checkin.run_checkin.return_value = True
@@ -883,9 +840,8 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
     @patch.dict(os.environ, {"ALI_COOKIES": "token=test"}, clear=True)
     @patch("src.main.CheckinManager")
     @patch("src.main.CoinsFarmManager")
-    @patch("src.main.CouponCollector")
     def test_main_exits_when_checkin_ok_but_session_invalid(
-        self, mock_coupons, mock_coins, mock_checkin, mock_jitter
+        self, mock_coins, mock_checkin, mock_jitter
     ):
         instance_checkin = MagicMock()
         instance_checkin.run_checkin.return_value = True
@@ -1092,28 +1048,6 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             tasks2 = mgr2.fetch_active_tasks()
             self.assertEqual(tasks2, [])
             self.assertEqual(mock_get2.call_count, 0, "Second instance must not query dead URLs again!")
-
-    def test_coupon_collector_skips_when_hub_unavailable(self):
-        CouponCollector.reset_dead_endpoints()
-        client1 = AliClient(cookies={"sid": "test1"})
-        collector1 = CouponCollector(client1)
-
-        resp_404 = MagicMock(status_code=404, text="Not Found")
-        with patch.object(client1.session, "get", return_value=resp_404), \
-             patch.object(client1.session, "post") as mock_post:
-            count = collector1.collect_available_coupons()
-            self.assertEqual(count, 0)
-            self.assertEqual(mock_post.call_count, 0, "No candidate claims should be sent when coupon hub is 404!")
-
-        # Second account instance should bypass immediately
-        client2 = AliClient(cookies={"sid": "test2"})
-        collector2 = CouponCollector(client2)
-        with patch.object(client2.session, "get") as mock_get2, \
-             patch.object(client2.session, "post") as mock_post2:
-            count2 = collector2.collect_available_coupons()
-            self.assertEqual(count2, 0)
-            self.assertEqual(mock_get2.call_count, 0, "Second instance should skip dead hub GET calls!")
-            self.assertEqual(mock_post2.call_count, 0)
 
     # --- Task 6: Network Resilience with Retry Adapter ---
 
@@ -1332,30 +1266,6 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             self.assertFalse(reported)
             self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
             self.assertIn("https://coins.aliexpress.com/api/task/finish", mgr._dead_urls)
-
-    def test_coupons_dead_endpoints_cached_on_none_and_504(self):
-        CouponCollector.reset_dead_endpoints()
-        client = AliClient(cookies={"sid": "test"})
-        collector = CouponCollector(client)
-
-        # 1. Hub returning None (network timeout)
-        with patch.object(client, "get", return_value=None):
-            count = collector.collect_available_coupons()
-            self.assertEqual(count, 0)
-            self.assertIn("https://www.aliexpress.com/coupon-center.html", collector._dead_endpoints)
-            self.assertIn("https://campaign.aliexpress.com/wow/gcp/ae/channel/ae/coupon-center/index", collector._dead_endpoints)
-
-        # 2. Claim endpoint returning 504
-        CouponCollector.reset_dead_endpoints()
-        resp_hub_ok = MagicMock(status_code=200, text="<html>activityId='test_act'</html>")
-        resp_claim_504 = MagicMock(status_code=504, text="Gateway Timeout")
-        with patch.object(client, "get", return_value=resp_hub_ok), \
-             patch.object(client, "post", return_value=resp_claim_504):
-            claimed = collector.collect_available_coupons()
-            self.assertEqual(claimed, 0)
-            self.assertIn("https://campaign.aliexpress.com/coupon/claim", collector._dead_endpoints)
-            self.assertIn("https://coupon.aliexpress.com/buyer/coupon/applyCoupon.htm", collector._dead_endpoints)
-
     def test_client_retry_adapter_raise_on_status_false(self):
         client = AliClient(cookies={})
         for scheme in ("https://", "http://"):
@@ -3456,7 +3366,6 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
              patch("src.main.AliClient") as mock_client_cls, \
              patch("src.main.CheckinManager") as mock_checkin_cls, \
              patch("src.main.CoinsFarmManager") as mock_coins_cls, \
-             patch("src.main.CouponCollector") as mock_coupon_cls, \
              patch("src.main.NotificationDispatcher") as mock_disp_cls:
 
             mock_checkin = mock_checkin_cls.return_value
@@ -3470,9 +3379,6 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             mock_coins = mock_coins_cls.return_value
             mock_coins.farm_browse_tasks.return_value = 2
             mock_coins.task_coins_earned = 30
-
-            mock_coupon = mock_coupon_cls.return_value
-            mock_coupon.collect_available_coupons.return_value = 1
 
             disp = MagicMock()
             mock_disp_cls.return_value = disp
@@ -3893,11 +3799,9 @@ class TestDetailedFarmerReporting(unittest.TestCase):
 
     def setUp(self):
         CoinsFarmManager.reset_dead_urls()
-        CouponCollector.reset_dead_endpoints()
 
     def tearDown(self):
         CoinsFarmManager.reset_dead_urls()
-        CouponCollector.reset_dead_endpoints()
 
     def test_account_summary_auto_computes_initial_coins_and_checkin_coins(self):
         from src.notifications import AccountSummary
@@ -3945,14 +3849,10 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             tasks_coins=20,
             tasks_skipped=1,
             tasks_failed=0,
-            coupons_claimed=1,
             task_details=[
                 {"task_id": "T1", "title": "Browse 1", "status": "COMPLETED", "coins": 10, "reason": "Переглянуто"},
                 {"task_id": "T2", "title": "Browse 2", "status": "COMPLETED", "coins": 10, "reason": "Переглянуто"},
                 {"task_id": "T3", "title": "Unsafe Cart", "status": "SKIPPED", "coins": 0, "reason": "Небезпечна дія"}
-            ],
-            coupon_details=[
-                {"id": "web_coupon_center_daily", "status": "SUCCESS", "reason": "Купон успішно зібрано"}
             ]
         ))
 
@@ -3977,10 +3877,6 @@ class TestDetailedFarmerReporting(unittest.TestCase):
                 self.assertIn("Browse 2", md)
                 self.assertIn("Unsafe Cart", md)
                 self.assertIn("Небезпечна дія", md)
-                # Перевірка таблиці купонів
-                self.assertIn("Деталізація зібраних купонів", md)
-                self.assertIn("web_coupon_center_daily", md)
-                self.assertIn("Купон успішно зібрано", md)
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -4006,7 +3902,6 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             tasks_coins=15,
             tasks_skipped=1,
             tasks_failed=0,
-            coupons_claimed=1,
             task_details=[
                 {"title": "Explore Deals", "status": "COMPLETED", "coins": 15, "reason": "Зараховано"},
                 {"title": "Add to Cart", "status": "SKIPPED", "coins": 0, "reason": "Пропущено безпекою"}
@@ -4029,11 +3924,10 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             self.assertIn("🖥️ PC: ✅ Зараховано (+25 🪙)", call_text)
             self.assertIn("📱 App: ✅ Зараховано (+15 🪙)", call_text)
 
-            # Перевірка тасок та купонів
+            # Перевірка тасок
             self.assertIn("🛍️ Таски: <b>1</b> вик. (+15 🪙), 1 пропущ.", call_text)
             self.assertIn("Explore Deals", call_text)
             self.assertIn("Add to Cart", call_text)
-            self.assertIn("🎟️ Купони: <b>1</b> зібрано", call_text)
 
     def test_telegram_message_truncation_on_extreme_length(self):
         from src.notifications import NotificationDispatcher, AccountSummary
@@ -4124,49 +4018,6 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             self.assertIn("Небезпечна дія", coins.task_records[0]["reason"])
             self.assertEqual(coins.task_records[1]["status"], "COMPLETED")
             self.assertEqual(coins.task_records[1]["coins"], 20)
-
-    def test_coupon_collector_records_coupon_attempts(self):
-        client = AliClient(cookies={"_m_h5_tk": "tk_coupons_123"})
-        coupon = CouponCollector(client)
-
-        mock_page = MagicMock(status_code=200, text='activityId="campaign_summer_2026"')
-        mock_claim = MagicMock(status_code=200)
-        mock_claim.headers = {"content-type": "application/json"}
-        mock_claim.json.return_value = {"success": True, "ret": ["SUCCESS::ok"]}
-
-        with patch.object(client, "get", return_value=mock_page), \
-             patch.object(client, "post", return_value=mock_claim):
-
-            count = coupon.collect_available_coupons()
-            self.assertGreaterEqual(count, 1)
-            self.assertTrue(len(coupon.coupon_records) > 0)
-            self.assertEqual(coupon.coupon_records[0]["status"], "SUCCESS")
-
-    def test_coupon_collector_records_already_done_and_skipped(self):
-        client = AliClient(cookies={"_m_h5_tk": "tk_coupons_456"})
-        coupon = CouponCollector(client)
-
-        # 1. Тест ALREADY_DONE
-        mock_page = MagicMock(status_code=200, text='activityId="campaign_promo_2026"')
-        mock_claim = MagicMock(status_code=200)
-        mock_claim.headers = {"content-type": "application/json"}
-        mock_claim.json.return_value = {"success": False, "msg": "coupon already claimed"}
-
-        with patch.object(client, "get", return_value=mock_page), \
-             patch.object(client, "post", return_value=mock_claim):
-            count = coupon.collect_available_coupons()
-            self.assertEqual(count, 0)
-            self.assertEqual(len(coupon.coupon_records), 1)
-            self.assertEqual(coupon.coupon_records[0]["status"], "ALREADY_DONE")
-
-        # 2. Тест SKIPPED при недоступності Coupon Center
-        mock_page_fail = MagicMock(status_code=503)
-        with patch.object(client, "get", return_value=mock_page_fail):
-            count2 = coupon.collect_available_coupons()
-            self.assertEqual(count2, 0)
-            self.assertEqual(len(coupon.coupon_records), 1)
-            self.assertEqual(coupon.coupon_records[0]["status"], "SKIPPED")
-            self.assertIn("503", coupon.coupon_records[0]["reason"])
 
     def test_telegram_safe_html_truncation_preserves_closed_tags(self):
         from src.notifications import _safe_truncate_html
@@ -4288,13 +4139,12 @@ class TestDetailedFarmerReporting(unittest.TestCase):
         truncated_br = _safe_truncate_html(raw_br, max_length=90)
         self.assertNotIn("</br>", truncated_br)
 
-    def test_coins_and_coupons_skip_when_checkin_captcha_required(self):
+    def test_coins_skip_when_checkin_captcha_required(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_captcha_123"})
         mgr = CheckinManager(client)
         mgr.status = "CAPTCHA_REQUIRED"
 
         coins = CoinsFarmManager(client, checkin_mgr=mgr)
-        coupons = CouponCollector(client, checkin_mgr=mgr)
 
         with patch.object(client, "get") as mock_get, \
              patch.object(client, "post") as mock_post:
@@ -4305,24 +4155,17 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             self.assertEqual(coins.task_records[0]["status"], "SKIPPED")
             self.assertIn("капчею WAF", coins.task_records[0]["reason"])
 
-            claimed_coupons = coupons.collect_available_coupons()
-            self.assertEqual(claimed_coupons, 0)
-            self.assertEqual(len(coupons.coupon_records), 1)
-            self.assertEqual(coupons.coupon_records[0]["status"], "SKIPPED")
-            self.assertIn("капчею WAF", coupons.coupon_records[0]["reason"])
-
             # Жодних запитів до серверів не надсилалося
             self.assertEqual(mock_get.call_count, 0)
             self.assertEqual(mock_post.call_count, 0)
 
-    def test_coins_and_coupons_skip_when_checkin_session_expired(self):
+    def test_coins_skip_when_checkin_session_expired(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_expired_123"})
         mgr = CheckinManager(client)
         mgr.status = "SESSION_EXPIRED"
         mgr.session_valid = False
 
         coins = CoinsFarmManager(client, checkin_mgr=mgr)
-        coupons = CouponCollector(client, checkin_mgr=mgr)
 
         with patch.object(client, "get") as mock_get, \
              patch.object(client, "post") as mock_post:
@@ -4332,53 +4175,8 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             self.assertEqual(coins.task_records[0]["status"], "SKIPPED")
             self.assertIn("недійсну сесію", coins.task_records[0]["reason"])
 
-            claimed_coupons = coupons.collect_available_coupons()
-            self.assertEqual(claimed_coupons, 0)
-            self.assertEqual(coupons.coupon_records[0]["status"], "SKIPPED")
-            self.assertIn("недійсну сесію", coupons.coupon_records[0]["reason"])
-
             self.assertEqual(mock_get.call_count, 0)
             self.assertEqual(mock_post.call_count, 0)
-
-    def test_coupon_collector_does_not_kill_endpoint_on_waf_captcha_response(self):
-        client = AliClient(cookies={"_m_h5_tk": "tk_test_waf"})
-        coupons = CouponCollector(client)
-
-        mock_page = MagicMock(status_code=200, text='activityId="test_campaign_waf"')
-        mock_claim = MagicMock(status_code=200, text="RGV587_RUN_SCRIPT")
-        mock_claim.headers = {"content-type": "text/html"}
-
-        with patch.object(client, "get", return_value=mock_page), \
-             patch.object(client, "post", return_value=mock_claim):
-            count = coupons.collect_available_coupons()
-            self.assertEqual(count, 0)
-            self.assertEqual(len(coupons.coupon_records), 1)
-            self.assertEqual(coupons.coupon_records[0]["status"], "CAPTCHA_REQUIRED")
-            # Ендпоінт НЕ повинен потрапити до неактивних через капчу
-            self.assertNotIn("https://campaign.aliexpress.com/coupon/claim", CouponCollector._dead_endpoints)
-
-    def test_telegram_reporting_when_coupons_already_done_or_skipped(self):
-        from src.notifications import NotificationDispatcher, AccountSummary
-        dispatcher = NotificationDispatcher()
-        dispatcher.telegram_bot_token = "token"
-        dispatcher.telegram_chat_id = "chat"
-
-        dispatcher.add_summary(AccountSummary(
-            name="Coupon_User",
-            checkin_status="SUCCESS",
-            coins_earned=20,
-            streak_days=3,
-            coupons_claimed=0,
-            coupon_details=[
-                {"id": "promo_1", "status": "ALREADY_DONE", "reason": "Вже зібрано"}
-            ]
-        ))
-
-        with patch("requests.post") as mock_post:
-            mock_post.return_value.status_code = 200
-            dispatcher.send_telegram_notification(detailed=True)
-            sent_text = mock_post.call_args[1]["json"]["text"]
-            self.assertIn("🎟️ Купони: ℹ️ Всі доступні купони вже отримано", sent_text)
 
     def test_summary_reports_no_accounts_status_when_empty(self):
         from src.notifications import NotificationDispatcher
@@ -4717,7 +4515,6 @@ class TestDetailedFarmerReporting(unittest.TestCase):
              patch("src.main.AliClient") as mock_client_cls, \
              patch("src.main.CheckinManager") as mock_chk_cls, \
              patch("src.main.CoinsFarmManager") as mock_coins_cls, \
-             patch("src.main.CouponCollector") as mock_coupon_cls, \
              patch("src.main.NotificationDispatcher") as mock_disp_cls, \
              patch("src.main.load_accounts", return_value=[("Acc_1", {"_m_h5_tk": "tk123"})]):
 
@@ -4746,10 +4543,6 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             mock_coins.tasks_failed = 0
             mock_coins.task_records = []
             mock_coins_cls.return_value = mock_coins
-
-            mock_coupon = MagicMock()
-            mock_coupon.collect_available_coupons.return_value = 0
-            mock_coupon_cls.return_value = mock_coupon
 
             dispatcher = MagicMock()
             mock_disp_cls.return_value = dispatcher
@@ -5397,31 +5190,6 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             expected_snippet = "💰 Баланс: <code>539</code> ➔ <b>564 🪙</b> (за запуск: <b>+25</b>, за день: <b>+55</b>)"
             self.assertIn(expected_snippet, call_text)
 
-    def test_coupon_priorities_not_masking_failed_status(self):
-        """Перевіряє, що статус FAILED купонів не приховується, якщо інший купон має статус ALREADY_DONE."""
-        from src.notifications import NotificationDispatcher, AccountSummary
-        dispatcher = NotificationDispatcher()
-        dispatcher.telegram_bot_token = "fake_token"
-        dispatcher.telegram_chat_id = "fake_chat"
-
-        dispatcher.add_summary(AccountSummary(
-            name="Coupon_Mix_Account",
-            checkin_status="SUCCESS",
-            coupons_claimed=0,
-            coupon_details=[
-                {"id": "c_pc", "status": "ALREADY_DONE", "reason": "Вже зібрано"},
-                {"id": "c_mob", "status": "FAILED", "reason": "Мережевий збій (500)"}
-            ]
-        ))
-
-        with patch("requests.post") as mock_post:
-            mock_post.return_value.status_code = 200
-            dispatcher.send_telegram_notification(detailed=True)
-            call_text = mock_post.call_args[1]["json"]["text"]
-
-            self.assertIn("⚠️ Не отримано (Мережевий збій (500))", call_text)
-            self.assertNotIn("Всі доступні купони вже отримано", call_text)
-
     def test_safe_truncate_html_cleans_empty_paired_tags(self):
         """Перевіряє, що _safe_truncate_html очищує порожні парні теги типу <b></b> на межі скорочення."""
         from src.notifications import _safe_truncate_html
@@ -5432,7 +5200,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
         self.assertLessEqual(len(truncated), 120)
 
     def test_telegram_concise_mode_default_omits_bullet_points_and_includes_fiat(self):
-        """Перевіряє, що за замовчуванням звіт у Telegram стислий (без переліку тасок і збоїв купонів) та містить еквівалент у USD і UAH."""
+        """Перевіряє, що за замовчуванням звіт у Telegram стислий (без переліку тасок) та містить еквівалент у USD і UAH."""
         from src.notifications import NotificationDispatcher, AccountSummary
         dispatcher = NotificationDispatcher()
         dispatcher.telegram_bot_token = "fake_token"
@@ -5441,9 +5209,6 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
         task_records = [
             {"title": "Explore Deals", "status": "COMPLETED", "coins": 15, "reason": "Зараховано"},
             {"title": "GoGo Match", "status": "SKIPPED", "coins": 0, "reason": "Міні-гра"}
-        ]
-        coupon_records = [
-            {"id": "web_coupon_center_daily", "status": "FAILED", "reason": "Ендпоінти не відповіли"}
         ]
 
         dispatcher.add_summary(AccountSummary(
@@ -5460,9 +5225,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             tasks_done=1,
             tasks_coins=15,
             tasks_skipped=1,
-            coupons_claimed=0,
-            task_details=task_records,
-            coupon_details=coupon_records
+            task_details=task_records
         ))
 
         with patch.dict(os.environ, {"USD_TO_UAH_RATE": "40.0"}), patch("requests.post") as mock_post:
@@ -5476,13 +5239,11 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             self.assertIn("💰 Баланс: <code>1,500</code> ➔ <b>1,555 🪙</b> (<b>+55</b>) • <b>$15.55 ≈ 622.0 грн</b>", call_text)
             self.assertIn("🛍️ Таски: <b>1</b> вик. (+15 🪙), 1 пропущ.", call_text)
 
-            # 2. Рутинні кулі та невдалі купони відсутні (стислий режим)
+            # 2. Рутинні кулі відсутні (стислий режим)
             self.assertNotIn("• ✅", call_text)
             self.assertNotIn("• ⏭️", call_text)
             self.assertNotIn("Explore Deals", call_text)
             self.assertNotIn("GoGo Match", call_text)
-            self.assertNotIn("web_coupon_center_daily", call_text)
-            self.assertNotIn("⚠️ Не отримано", call_text)
 
     def test_get_usd_to_uah_rate_env_override_and_fallback(self):
         """Перевіряє роботу отримання курсу НБУ, змінної оточення та аварійного значення 42.0."""
@@ -5656,7 +5417,7 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
             mgr.farm_browse_tasks()
             self.assertEqual(mgr.tasks_already_done, 0)
 
-    def test_waf_blocked_skips_downstream_coins_and_coupons(self):
+    def test_waf_blocked_skips_downstream_coins(self):
         client = AliClient(cookies={})
         mock_checkin = MagicMock()
         mock_checkin.waf_blocked = True
@@ -5666,12 +5427,6 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
             coins = coins_mgr.farm_browse_tasks()
             self.assertEqual(coins, 0)
             mock_fetch.assert_not_called()
-
-        coupon_mgr = CouponCollector(client, checkin_mgr=mock_checkin)
-        with patch.object(client, "get") as mock_client_get:
-            coupons = coupon_mgr.collect_available_coupons()
-            self.assertEqual(coupons, 0)
-            mock_client_get.assert_not_called()
 
     def test_normalize_task_url_and_passive_wait_for_invalid_url(self):
         from src.coins import _normalize_task_url
@@ -5769,7 +5524,6 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
              patch("src.main.AliClient.sleep_random"), \
              patch("src.main.CheckinManager") as mock_chk_cls, \
              patch("src.main.CoinsFarmManager") as mock_coins_cls, \
-             patch("src.main.CouponCollector") as mock_coup_cls, \
              patch("src.main.NotificationDispatcher") as mock_disp_cls:
             mock_disp = mock_disp_cls.return_value
             mock_chk = mock_chk_cls.return_value
@@ -5788,10 +5542,6 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
             mock_coins.tasks_done = 1
             mock_coins.tasks_coins = 5
             mock_coins.task_details = []
-
-            mock_coup = mock_coup_cls.return_value
-            mock_coup.coupons_collected = 0
-            mock_coup.coupon_records = []
 
             main()
             mock_disp.dispatch.assert_called_once()

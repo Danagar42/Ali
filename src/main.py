@@ -48,7 +48,6 @@ from src.auth import load_accounts
 from src.client import AliClient
 from src.checkin import CheckinManager
 from src.coins import CoinsFarmManager
-from src.coupons import CouponCollector
 from src.notifications import NotificationDispatcher, AccountSummary
 
 
@@ -69,7 +68,7 @@ def initial_random_jitter():
 
 def main():
     setup_logging()
-    logger.info("🚀 Запуск AliExpress Coin & Coupon Farmer")
+    logger.info("🚀 Запуск AliExpress Coin Farmer")
 
     # 1. Початковий зсув часу
     initial_random_jitter()
@@ -110,11 +109,7 @@ def main():
                 coins_mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
                 coins_done = coins_mgr.farm_browse_tasks(count=MAX_SAFE_TASKS_PER_RUN)
 
-                # 3.3 Збір купонів
-                coupon_mgr = CouponCollector(client, checkin_mgr=checkin_mgr)
-                coupons_done = coupon_mgr.collect_available_coupons()
-
-                # 3.4 Оновлюємо актуальний баланс монет після виконання всіх завдань
+                # 3.3 Оновлюємо актуальний баланс монет після виконання всіх завдань
                 try:
                     checkin_mgr._fetch_coin_balance()
                 except Exception as e:
@@ -170,9 +165,6 @@ def main():
                 tasks_already_done = int(getattr(coins_mgr, "tasks_already_done", 0)) if isinstance(getattr(coins_mgr, "tasks_already_done", 0), (int, float)) else 0
                 if tasks_already_done == 0 and task_records:
                     tasks_already_done = sum(1 for t in task_records if isinstance(t, dict) and t.get("status") in ("ALREADY_DONE", "DONE"))
-                coupon_records = getattr(coupon_mgr, "coupon_records", [])
-                if not isinstance(coupon_records, list):
-                    coupon_records = []
 
                 # Фіксація звіту по акаунту для сповіщень
                 summary = AccountSummary(
@@ -182,7 +174,6 @@ def main():
                     streak_days=checkin_mgr.streak_days,
                     total_coins=account_total_coins,
                     tasks_done=coins_done,
-                    coupons_claimed=coupons_done,
                     session_valid=checkin_mgr.session_valid,
                     initial_coins=initial_balance,
                     pc_status=pc_status,
@@ -196,8 +187,7 @@ def main():
                     tasks_already_done=tasks_already_done,
                     tasks_skipped=tasks_skipped,
                     tasks_failed=tasks_failed,
-                    task_details=task_records,
-                    coupon_details=coupon_records
+                    task_details=task_records
                 )
                 dispatcher.add_summary(summary)
 
@@ -269,18 +259,12 @@ def main():
                         logger.info(f"   │   {st_icon} {td.get('title')}{coins_s}{reason_s}")
                     if len(sorted_td) > 10:
                         logger.info(f"   │   ... ще {len(sorted_td) - 10} завдань")
-                logger.info(f"   ├ Зібрано купонів: {s.coupons_claimed}")
-                if s.coupon_details:
-                    for cd in s.coupon_details[:3]:
-                        c_icon = "✅" if cd.get("status") == "SUCCESS" else ("ℹ️" if cd.get("status") == "ALREADY_DONE" else "⚠️")
-                        logger.info(f"   │   {c_icon} {cd.get('id')}: {cd.get('reason')}")
                 logger.info(f"   └ 💰 Баланс: {init_str} ➔ {total_str} 🪙 (Сьогодні: +{earned_str} 🪙)")
             logger.info(f"-------------------------------------------------------")
             total_earned_all = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in dispatcher.summaries)
             total_checkin_all = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in dispatcher.summaries)
             total_tasks_all = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in dispatcher.summaries)
-            total_coupons_all = sum(int(s.coupons_claimed) if isinstance(s.coupons_claimed, (int, float)) else 0 for s in dispatcher.summaries)
-            logger.info(f"Успішно: {success_count} | З помилками: {failed_count} | Всього монет: +{total_earned_all} 🪙 (Чекін: +{total_checkin_all}, Таски: +{total_tasks_all}) | Купонів: {total_coupons_all}")
+            logger.info(f"Успішно: {success_count} | З помилками: {failed_count} | Всього монет: +{total_earned_all} 🪙 (Чекін: +{total_checkin_all}, Таски: +{total_tasks_all})")
             logger.info(f"=======================================================\n")
 
             # 4. Відправка сповіщень у GitHub Actions Step Summary та Telegram
