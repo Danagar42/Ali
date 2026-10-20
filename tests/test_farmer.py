@@ -5641,6 +5641,146 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
             self.assertEqual(mgr.tasks_already_done, 1)
             self.assertEqual(mgr.tasks_skipped, 1)  # NOT 2!
 
+    def test_telegram_notification_skipped_on_schedule_when_already_done(self):
+        """Перевіряє, що фоновий запуск за розкладом не надсилає повідомлення в Telegram, якщо все вже виконано (ALREADY_DONE)."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+        dispatcher.add_summary(AccountSummary(
+            name="Account_1",
+            checkin_status="ALREADY_DONE",
+            pc_status="ALREADY_DONE",
+            mobile_status="ALREADY_DONE",
+            coins_earned=50,
+            initial_coins=1000,
+            total_coins=1000,
+            tasks_done=0,
+            tasks_coins=0,
+            session_valid=True
+        ))
+
+        ci_env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+            "SKIP_RANDOM_SLEEP": "0",
+            "TELEGRAM_NOTIFY_ALWAYS": "0"
+        }
+        with patch.dict(os.environ, ci_env), patch("requests.post") as mock_post:
+            sent = dispatcher.send_telegram_notification()
+            self.assertFalse(sent)
+            mock_post.assert_not_called()
+
+    def test_telegram_notification_sent_on_schedule_when_fresh_success(self):
+        """Перевіряє, що плановий запуск за розкладом надсилає сповіщення при новому успішному чекіні (SUCCESS)."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+        dispatcher.add_summary(AccountSummary(
+            name="Account_1",
+            checkin_status="SUCCESS",
+            pc_status="SUCCESS",
+            mobile_status="SUCCESS",
+            coins_earned=50,
+            initial_coins=950,
+            total_coins=1000,
+            tasks_done=1,
+            tasks_coins=10,
+            session_valid=True
+        ))
+
+        ci_env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+            "SKIP_RANDOM_SLEEP": "0",
+            "TELEGRAM_NOTIFY_ALWAYS": "0"
+        }
+        with patch.dict(os.environ, ci_env), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            sent = dispatcher.send_telegram_notification()
+            self.assertTrue(sent)
+            mock_post.assert_called_once()
+
+    def test_telegram_notification_sent_on_schedule_when_has_problem(self):
+        """Перевіряє, що плановий запуск за розкладом надсилає сповіщення, якщо сесія прострочена або потрібна капча."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+        dispatcher.add_summary(AccountSummary(
+            name="Account_1",
+            checkin_status="SESSION_EXPIRED",
+            session_valid=False
+        ))
+
+        ci_env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+            "SKIP_RANDOM_SLEEP": "0",
+            "TELEGRAM_NOTIFY_ALWAYS": "0"
+        }
+        with patch.dict(os.environ, ci_env), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            sent = dispatcher.send_telegram_notification()
+            self.assertTrue(sent)
+            mock_post.assert_called_once()
+
+    def test_telegram_notification_sent_on_manual_dispatch_even_if_already_done(self):
+        """Перевіряє, що ручний запуск (workflow_dispatch) завжди надсилає сповіщення в Telegram, навіть якщо ALREADY_DONE."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+        dispatcher.add_summary(AccountSummary(
+            name="Account_1",
+            checkin_status="ALREADY_DONE",
+            pc_status="ALREADY_DONE",
+            mobile_status="ALREADY_DONE",
+            coins_earned=50,
+            initial_coins=1000,
+            total_coins=1000,
+            tasks_done=0,
+            tasks_coins=0,
+            session_valid=True
+        ))
+
+        ci_env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "SKIP_RANDOM_SLEEP": "1",
+            "TELEGRAM_NOTIFY_ALWAYS": "0"
+        }
+        with patch.dict(os.environ, ci_env), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            sent = dispatcher.send_telegram_notification()
+            self.assertTrue(sent)
+            mock_post.assert_called_once()
+
+    def test_telegram_notification_sent_when_notify_always_set(self):
+        """Перевіряє, що TELEGRAM_NOTIFY_ALWAYS=1 примусово відправляє сповіщення навіть при повторних запусках."""
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "fake_token"
+        dispatcher.telegram_chat_id = "fake_chat"
+        dispatcher.add_summary(AccountSummary(
+            name="Account_1",
+            checkin_status="ALREADY_DONE",
+            session_valid=True
+        ))
+
+        ci_env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+            "SKIP_RANDOM_SLEEP": "0",
+            "TELEGRAM_NOTIFY_ALWAYS": "1"
+        }
+        with patch.dict(os.environ, ci_env), patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            sent = dispatcher.send_telegram_notification()
+            self.assertTrue(sent)
+            mock_post.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

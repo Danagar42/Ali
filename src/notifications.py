@@ -503,6 +503,41 @@ class NotificationDispatcher:
             for s in self.summaries
         )
 
+        # Перевірка на свіжі дії або проблеми для уникнення повторного спаму в Telegram при рознесеному розкладі
+        fresh_action = any(
+            s.checkin_status == "SUCCESS"
+            or s.pc_status == "SUCCESS"
+            or s.mobile_status == "SUCCESS"
+            or (isinstance(s.tasks_done, (int, float)) and s.tasks_done > 0)
+            or (isinstance(s.tasks_coins, (int, float)) and s.tasks_coins > 0)
+            or (
+                isinstance(s.total_coins, (int, float))
+                and isinstance(s.initial_coins, (int, float))
+                and s.total_coins > s.initial_coins
+            )
+            for s in self.summaries
+        )
+        has_problem = (
+            has_expired
+            or has_captcha
+            or (successful_accounts < total_accounts)
+            or any(bool(s.error_message) for s in self.summaries)
+            or any(s.checkin_status in ("FAILED", "SESSION_EXPIRED", "CAPTCHA_REQUIRED") for s in self.summaries)
+        )
+
+        is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+        event_name = os.getenv("GITHUB_EVENT_NAME", "").strip().lower()
+        skip_sleep = os.getenv("SKIP_RANDOM_SLEEP", "").strip().lower() in ("1", "true", "yes")
+        is_manual = (event_name == "workflow_dispatch") or skip_sleep or (not is_ci)
+        notify_always = os.getenv("TELEGRAM_NOTIFY_ALWAYS", "").strip().lower() in ("1", "true", "yes")
+
+        # Якщо це фоновий плановий запуск і всі акаунти вже були успішно оброблені раніше (ALREADY_DONE)
+        # без нових дій та помилок — пропускаємо сповіщення в Telegram, щоб не спамити повторно протягом дня.
+        if is_ci and not is_manual and not notify_always:
+            if not fresh_action and not has_problem:
+                logger.info("ℹ️ Усі акаунти вже були успішно оброблені сьогодні (ALREADY_DONE), повторне сповіщення в Telegram пропущено.")
+                return False
+
         if has_expired:
             status_header = "🚨 <b>AliExpress Farmer: Потрібна увага!</b>"
         elif has_captcha:

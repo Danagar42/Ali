@@ -46,6 +46,7 @@ jobs:
         env:
           # Пропускаємо довгу паузу при ручному запуску через кнопку
           SKIP_RANDOM_SLEEP: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           # Гнучка передача необмеженої кількості акаунтів через єдиний JSON-секрет
           ALI_COOKIES_JSON: ${{ secrets.ALI_COOKIES_JSON }}
           # Основний або перший акаунт
