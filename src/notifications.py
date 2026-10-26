@@ -181,10 +181,12 @@ class AccountSummary:
     name: str
     checkin_status: str  # "SUCCESS", "ALREADY_DONE", "CAPTCHA_REQUIRED", "FAILED", "SESSION_EXPIRED"
     coins_earned: int = 0
+    coins_earned_this_run: Optional[int] = None
+    prior_rewards_today: int = 0
     streak_days: int = 0
     total_coins: Optional[int] = None
+    balance_verified: bool = True
     tasks_done: int = 0
-    coupons_claimed: int = 0
     session_valid: bool = True
     error_message: Optional[str] = None
     initial_coins: Optional[int] = None
@@ -195,18 +197,20 @@ class AccountSummary:
     mobile_coins: int = 0
     mobile_streak: int = 0
     checkin_coins: int = 0
+    tasks_status: Optional[str] = None
     tasks_coins: int = 0
     tasks_already_done: int = 0
     tasks_skipped: int = 0
     tasks_failed: int = 0
     task_details: List[Dict[str, Any]] = field(default_factory=list)
-    coupon_details: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
-        # Автоматично вираховуємо initial_coins, якщо він не переданий явно, але відомі total_coins
-        if self.initial_coins is None and isinstance(self.total_coins, (int, float)):
-            earned = int(self.coins_earned) if isinstance(self.coins_earned, (int, float)) else 0
-            self.initial_coins = max(0, int(self.total_coins) - earned)
+        # Якщо coins_earned_this_run не переданий явно, вираховуємо з coins_earned та prior_rewards_today
+        if self.coins_earned_this_run is None:
+            if self.prior_rewards_today > 0:
+                self.coins_earned_this_run = 0
+            else:
+                self.coins_earned_this_run = self.coins_earned
         if self.tasks_already_done == 0 and self.task_details:
             self.tasks_already_done = sum(
                 1 for t in self.task_details
@@ -221,6 +225,53 @@ class AccountSummary:
                 self.checkin_coins = max(0, earned - tc)
             elif pc_c > 0 or mob_c > 0:
                 self.checkin_coins = pc_c + mob_c
+
+    @property
+    def aggregate_status(self) -> str:
+        """
+        Агрегований статус акаунта:
+        - ACTION_REQUIRED: потрібна дія користувача (прострочена сесія або капча)
+        - FAILED: збій усіх етапів або відсутність успішних результатів при наявності помилок
+        - PARTIAL: частковий успіх (деякі етапи успішні, деякі зазнали збою)
+        - OK: усі запущені етапи успішно завершені без збоїв
+        """
+        if (
+            not self.session_valid
+            or self.checkin_status in ("SESSION_EXPIRED", "CAPTCHA_REQUIRED")
+            or self.pc_status in ("SESSION_EXPIRED", "CAPTCHA_REQUIRED")
+            or self.mobile_status in ("SESSION_EXPIRED", "CAPTCHA_REQUIRED")
+            or self.tasks_status in ("SESSION_EXPIRED", "CAPTCHA_REQUIRED")
+        ):
+            return "ACTION_REQUIRED"
+
+        has_failures = (
+            self.checkin_status not in ("SUCCESS", "ALREADY_DONE")
+            or self.mobile_status == "FAILED"
+            or self.pc_status == "FAILED"
+            or self.tasks_status == "FAILED"
+            or self.tasks_failed > 0
+            or bool(self.error_message)
+        )
+        has_successes = (
+            self.checkin_status in ("SUCCESS", "ALREADY_DONE")
+            or self.pc_status in ("SUCCESS", "ALREADY_DONE")
+            or self.mobile_status in ("SUCCESS", "ALREADY_DONE")
+            or self.tasks_status in ("SUCCESS", "ALREADY_DONE")
+            or self.coins_earned > 0
+            or self.tasks_done > 0
+        )
+
+        if has_successes and not has_failures:
+            return "OK"
+        elif has_successes and has_failures:
+            return "PARTIAL"
+        else:
+            return "FAILED"
+
+    @property
+    def has_problem(self) -> bool:
+        """Повертає True, якщо обробка акаунта завершилася зі збоєм, частково або потребує дії."""
+        return self.aggregate_status in ("PARTIAL", "FAILED", "ACTION_REQUIRED")
 
 
 class NotificationDispatcher:
@@ -254,9 +305,9 @@ class NotificationDispatcher:
     def _session_icon(self, valid: bool) -> str:
         return "🟢 Активна" if valid else "🔴 Недійсна"
 
-    def generate_step_summary(self) -> Optional[str]:
+    def format_step_summary(self) -> str:
         """
-        Генерує багатий структурований Markdown-звіт та записує його у $GITHUB_STEP_SUMMARY.
+        Форматує багатий структурований Markdown-звіт для GitHub Step Summary.
         Містить:
         - Загальний статус та статистику нагород (чекін + таски)
         - Основну зведену таблицю результатів по акаунтах
@@ -264,11 +315,6 @@ class NotificationDispatcher:
         - Деталізацію виконаних, пропущених та збійних інтерактивних завдань MTOP
         - Деталізацію зібраних купонів
         """
-        summary_file = os.getenv("GITHUB_STEP_SUMMARY")
-        if not summary_file:
-            logger.debug("GITHUB_STEP_SUMMARY не визначено (не в GitHub Actions runner).")
-            return None
-
         total_accounts = len(self.summaries)
         successful_accounts = sum(
             1 for s in self.summaries
@@ -349,6 +395,9 @@ class NotificationDispatcher:
                         total_str = f"{_format_coins(s.total_coins)} 🪙"
                 else:
                     total_str = f"{_format_coins(s.total_coins)} 🪙"
+
+                if not getattr(s, "balance_verified", True) and s.tasks_coins > 0:
+                    total_str += f" (+{s.tasks_coins} оцінка)"
             else:
                 total_str = "-"
             tasks_str = str(s.tasks_done)
@@ -359,7 +408,9 @@ class NotificationDispatcher:
 
         lines.append("")
 
-        # Таблиця помилок, якщо такі виникали
+        if any(not getattr(s, "balance_verified", True) and s.tasks_coins > 0 for s in self.summaries):
+            lines.append("> ⚠️ **Увага:** Пост-баланс не верифіковано сервером через захист або таймаут, бонуси за завдання вказані як попередня оцінка.")
+            lines.append("")
         errors = [s for s in self.summaries if s.error_message]
         if errors:
             lines.extend([
@@ -452,8 +503,19 @@ class NotificationDispatcher:
                     lines.append(f"| **{safe_name}** | Завдання платформи | ℹ️ Немає | - | Завдання не виконувалися |")
             lines.append("")
 
-        content = "\n".join(lines)
+        return "\n".join(lines)
 
+    def generate_step_summary(self) -> Optional[str]:
+        """
+        Генерує багатий структурований Markdown-звіт та записує його у $GITHUB_STEP_SUMMARY.
+        Повертає згенерований текст або None, якщо змінна оточення відсутня.
+        """
+        summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+        if not summary_file:
+            logger.debug("GITHUB_STEP_SUMMARY не визначено (не в GitHub Actions runner).")
+            return None
+
+        content = self.format_step_summary()
         try:
             with open(summary_file, "a", encoding="utf-8") as f:
                 f.write(content + "\n")
@@ -521,8 +583,11 @@ class NotificationDispatcher:
             has_expired
             or has_captcha
             or (successful_accounts < total_accounts)
+            or any(s.aggregate_status in ("PARTIAL", "FAILED", "ACTION_REQUIRED") for s in self.summaries)
             or any(bool(s.error_message) for s in self.summaries)
             or any(s.checkin_status in ("FAILED", "SESSION_EXPIRED", "CAPTCHA_REQUIRED") for s in self.summaries)
+            or any(s.mobile_status == "FAILED" for s in self.summaries)
+            or any(s.tasks_failed > 0 for s in self.summaries)
         )
 
         is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
@@ -546,7 +611,7 @@ class NotificationDispatcher:
             status_header = "ℹ️ <b>AliExpress Daily Farm: Немає акаунтів</b>"
         elif successful_accounts == 0 and total_accounts > 0:
             status_header = "❌ <b>AliExpress Daily Farm: Збій!</b>"
-        elif successful_accounts < total_accounts:
+        elif successful_accounts < total_accounts or any(s.aggregate_status == "PARTIAL" for s in self.summaries):
             status_header = "⚠️ <b>AliExpress Daily Farm: Частковий успіх</b>"
         else:
             status_header = "🚀 <b>AliExpress Daily Farm: Звіт</b>"
@@ -568,11 +633,24 @@ class NotificationDispatcher:
         msg_lines.append(coins_line)
         msg_lines.append("")
 
+        # Розміщуємо критичні попередження про сесію та капчу нагорі повідомлення перед списком акаунтів
+        if has_expired or has_captcha:
+            if has_expired:
+                expired_names = [html.escape(s.name) for s in self.summaries if not s.session_valid or s.checkin_status == "SESSION_EXPIRED" or s.pc_status == "SESSION_EXPIRED" or s.mobile_status == "SESSION_EXPIRED"]
+                msg_lines.append(f"⚠️ <b>УВАГА: Сесію прострочено:</b> {', '.join(expired_names)}. Оновіть cookies у секретах!")
+            if has_captcha:
+                captcha_names = [html.escape(s.name) for s in self.summaries if s.checkin_status == "CAPTCHA_REQUIRED" or s.pc_status == "CAPTCHA_REQUIRED" or s.mobile_status == "CAPTCHA_REQUIRED"]
+                msg_lines.append(f"🧩 <b>УВАГА: Виявлено капчу WAF:</b> {', '.join(captcha_names)}. Пройдіть перевірку в браузері!")
+            msg_lines.append("")
+
         for s in self.summaries:
-            if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid:
+            agg_st = s.aggregate_status
+            if agg_st == "OK":
                 status_badge = "✅"
-            elif s.checkin_status == "CAPTCHA_REQUIRED" or s.pc_status == "CAPTCHA_REQUIRED" or s.mobile_status == "CAPTCHA_REQUIRED":
-                status_badge = "🧩"
+            elif agg_st == "PARTIAL":
+                status_badge = "⚠️"
+            elif agg_st == "ACTION_REQUIRED":
+                status_badge = "🧩" if (s.checkin_status == "CAPTCHA_REQUIRED" or s.pc_status == "CAPTCHA_REQUIRED" or s.mobile_status == "CAPTCHA_REQUIRED") else "🚨"
             else:
                 status_badge = "❌"
 
@@ -600,6 +678,10 @@ class NotificationDispatcher:
             # 1. Початковий та фінальний баланс монет + фіатний еквівалент
             if s.total_coins is not None:
                 fiat_total = _format_fiat_equiv(s.total_coins, rate=rate, show_sign=False)
+                verified_note = ""
+                if not getattr(s, "balance_verified", True) and s.tasks_coins > 0:
+                    verified_note = f" (бонус ~+{s.tasks_coins} 🪙 очікує підтвердження)"
+
                 if s.initial_coins is not None:
                     actual_diff = int(s.total_coins) - int(s.initial_coins)
                     diff_str = f"+{actual_diff}" if actual_diff > 0 else str(actual_diff)
@@ -607,17 +689,17 @@ class NotificationDispatcher:
                     if actual_diff != earned_v:
                         sub_lines.append(
                             f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
-                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>) • <b>{fiat_total}</b>"
+                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>){verified_note} • <b>{fiat_total}</b>"
                         )
                     elif earned_v > 0 or actual_diff != 0:
                         sub_lines.append(
                             f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
-                            f"(<b>{diff_str}</b>) • <b>{fiat_total}</b>"
+                            f"(<b>{diff_str}</b>){verified_note} • <b>{fiat_total}</b>"
                         )
                     else:
-                        sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b> • <b>{fiat_total}</b>")
+                        sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>{verified_note} • <b>{fiat_total}</b>")
                 else:
-                    sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b> • <b>{fiat_total}</b>")
+                    sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>{verified_note} • <b>{fiat_total}</b>")
             elif earned_v > 0:
                 fiat_earned = _format_fiat_equiv(earned_v, rate=rate, show_sign=True)
                 sub_lines.append(f"   💰 Зароблено сьогодні: <b>+{earned_v} 🪙</b> (<b>{fiat_earned}</b>) (загальний баланс не отримано)")
@@ -752,6 +834,11 @@ class NotificationDispatcher:
             msg_lines.extend([
                 "",
                 "🧩 <i>Виявлено захист Alibaba WAF! Відкрийте AliExpress у браузері та пройдіть слайдер перевірки.</i>"
+            ])
+        if any(not getattr(s, "balance_verified", True) and s.tasks_coins > 0 for s in self.summaries):
+            msg_lines.extend([
+                "",
+                "⚠️ <i>Пост-баланс не верифіковано сервером (бонуси за завдання вказані орієнтовно).</i>"
             ])
 
         text = "\n".join(msg_lines)

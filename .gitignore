@@ -19,4 +19,6 @@ desktop.ini
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.state/
+*.state
 FULL_PROJECT_CODE.md

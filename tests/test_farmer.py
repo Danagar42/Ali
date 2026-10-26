@@ -48,7 +48,7 @@ from src.checkin import (
     _extract_prize_coins,
     _extract_node_streak
 )
-from src.coins import CoinsFarmManager, REPORT_TASK_URLS, _extract_coins_from_complete_result
+from src.coins import CoinsFarmManager, _extract_coins_from_complete_result
 import src.main as main_module
 
 
@@ -140,8 +140,8 @@ class TestCheckin(unittest.TestCase):
         self.assertFalse(is_checkin_success({"ret": []}))
         # None ret (must NOT raise TypeError)
         self.assertFalse(is_checkin_success({"ret": None}))
-        # Standard ret success
-        self.assertTrue(is_checkin_success({"ret": ["SUCCESS::success"]}))
+        # Bare ret success without business payload is not verified business success
+        self.assertFalse(is_checkin_success({"ret": ["SUCCESS::success"]}))
         # Boolean success flag
         self.assertTrue(is_checkin_success({"success": True}))
         # Nested result success
@@ -198,29 +198,24 @@ class TestCoinsTasks(unittest.TestCase):
     @patch("src.client.AliClient.sleep_random")
     def test_coins_farm_browse_tasks(self, mock_sleep):
         client = AliClient(cookies={"sid": "test"})
-        manager = CoinsFarmManager(client)
+        checkin_mgr = CheckinManager(client)
+        manager = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
 
-        mock_task_resp = MagicMock()
-        mock_task_resp.status_code = 200
-        mock_task_resp.json.return_value = {
-            "data": {
-                "taskList": [
-                    {"taskId": "TASK_1", "taskType": "BROWSE_ITEM", "completed": False}
-                ]
-            }
+        mock_task = {
+            "taskId": "TASK_1",
+            "taskTitle": "Browse Items",
+            "taskType": 0,
+            "actionUrl": "https://aliexpress.com/item/1.html",
+            "status": "todo",
+            "staySeconds": 15
         }
 
-        mock_report_resp = MagicMock()
-        mock_report_resp.status_code = 200
-        mock_report_resp.json.return_value = {"success": True}
-
-        with patch.object(client, "get", return_value=mock_task_resp), \
-             patch.object(client, "post", return_value=mock_report_resp) as mock_post:
-            manager.farm_browse_tasks(count=2)
-            self.assertTrue(mock_post.called)
-            called_payload = mock_post.call_args[1]["json"]
-            self.assertEqual(called_payload["channel"], "COIN")
-            self.assertIn("taskId", called_payload)
+        with patch.object(manager, "fetch_active_tasks", return_value=[mock_task]), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(checkin_mgr, "_call_mtop", return_value={"ret": ["SUCCESS::ok"], "data": {"result": {"completeSuccess": True, "instanceStatus": 2, "awardAmount": 5}}}) as mock_mtop:
+            done = manager.farm_browse_tasks(count=2)
+            self.assertEqual(done, 1)
+            self.assertTrue(mock_mtop.called)
 
 
 class TestMainErrorHandling(unittest.TestCase):
@@ -885,21 +880,52 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
     def test_coins_browse_no_fake_completion_on_page_ok(self):
         CoinsFarmManager.reset_dead_urls()
         client = AliClient(cookies={"sid": "test"})
-        manager = CoinsFarmManager(client)
+        checkin_mgr = CheckinManager(client)
+        manager = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+        task = {
+            "taskId": "task1",
+            "taskTitle": "Browse Items",
+            "taskType": 0,
+            "actionUrl": "https://aliexpress.com/item/1005001.html",
+            "status": "todo",
+            "staySeconds": 15,
+        }
 
-        with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
-             patch.object(manager, "_report_task_complete", return_value=False):
+        with patch.object(client, "sleep_random"), \
+             patch.object(manager, "fetch_active_tasks", return_value=[task]), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(manager, "_complete_task", return_value=False):
             done = manager.farm_browse_tasks(count=3)
-            self.assertEqual(done, 0, "Browsing HTTP 200 must not increment completed count if reporting failed!")
+            self.assertEqual(done, 0, "Browsing HTTP 200 must not increment completed count if completion failed!")
 
     def test_coins_browse_counts_real_reported_tasks(self):
         CoinsFarmManager.reset_dead_urls()
         client = AliClient(cookies={"sid": "test"})
-        manager = CoinsFarmManager(client)
+        checkin_mgr = CheckinManager(client)
+        manager = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+        tasks = [
+            {
+                "taskId": f"task_{i}",
+                "taskTitle": f"Browse Items {i}",
+                "taskType": 0,
+                "actionUrl": f"https://aliexpress.com/item/{i}.html",
+                "status": "todo",
+                "staySeconds": 15,
+            }
+            for i in range(3)
+        ]
 
         reports = [True, False, True]
-        with patch.object(client, "get", return_value=MagicMock(status_code=200)), \
-             patch.object(manager, "_report_task_complete", side_effect=reports):
+        def fake_complete(task):
+            res = reports.pop(0)
+            if res:
+                task["completeSuccess"] = True
+            return res
+
+        with patch.object(client, "sleep_random"), \
+             patch.object(manager, "fetch_active_tasks", return_value=tasks), \
+             patch.object(client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(manager, "_complete_task", side_effect=fake_complete):
             done = manager.farm_browse_tasks(count=3)
             self.assertEqual(done, 2)
 
@@ -1027,6 +1053,22 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             expected_secret = f"${{{{ secrets.ALI_PROXY_{i} }}}}"
             self.assertIn(expected_key, content, f"Missing {expected_key} in farm.yml")
             self.assertIn(expected_secret, content, f"Missing {expected_secret} in farm.yml")
+
+    def test_workflow_uses_actions_cache_for_state_persistence(self):
+        workflow_path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "farm.yml")
+        self.assertTrue(os.path.exists(workflow_path), f"Workflow file not found at {workflow_path}")
+        with open(workflow_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertTrue(
+            "actions/cache@v4" in content or ("actions/cache/restore@v4" in content and "actions/cache/save@v4" in content),
+            "Workflow must use actions/cache for state persistence"
+        )
+        self.assertIn("path: .state", content)
+        self.assertIn("key: farmer-history-${{ github.run_id }}", content)
+        self.assertIn("farmer-history-", content)
+        self.assertNotIn("actions/download-artifact", content)
+        self.assertNotIn("actions/upload-artifact", content)
 
     # --- Task 5: Dead REST Endpoints Optimization ---
 
@@ -1258,14 +1300,14 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             self.assertIn("https://coins.aliexpress.com/api/tasks", mgr._dead_urls)
             self.assertIn("https://coins.aliexpress.com/api/task/list", mgr._dead_urls)
 
-        # 2. 504 Gateway Timeout on report
+        # 2. 504 Gateway Timeout on task query
         CoinsFarmManager.reset_dead_urls()
         resp_504 = MagicMock(status_code=504, text="Gateway Timeout")
-        with patch.object(client, "post", return_value=resp_504):
-            reported = mgr._report_task_complete("BROWSE_ITEM", "task1")
-            self.assertFalse(reported)
-            self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
-            self.assertIn("https://coins.aliexpress.com/api/task/finish", mgr._dead_urls)
+        with patch.object(client, "get", return_value=resp_504):
+            tasks = mgr.fetch_active_tasks()
+            self.assertEqual(tasks, [])
+            self.assertIn("https://coins.aliexpress.com/api/tasks", mgr._dead_urls)
+            self.assertIn("https://coins.aliexpress.com/api/task/list", mgr._dead_urls)
     def test_client_retry_adapter_raise_on_status_false(self):
         client = AliClient(cookies={})
         for scheme in ("https://", "http://"):
@@ -1433,15 +1475,13 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
             self.assertEqual(mgr.status, "CAPTCHA_REQUIRED")
             mock_mtop.assert_not_called()
 
-    def test_farm_browse_tasks_skips_catalog_when_all_report_urls_are_dead(self):
+    def test_farm_browse_tasks_skips_when_no_active_tasks(self):
         CoinsFarmManager.reset_dead_urls()
         client = AliClient(cookies={"sid": "test"})
         mgr = CoinsFarmManager(client)
 
-        for u in REPORT_TASK_URLS:
-            mgr._dead_urls.add(u)
-
-        with patch.object(client, "get") as mock_get:
+        with patch.object(mgr, "fetch_active_tasks", return_value=[]), \
+             patch.object(client, "get") as mock_get:
             res = mgr.farm_browse_tasks(count=4)
             self.assertEqual(res, 0)
             mock_get.assert_not_called()
@@ -1592,10 +1632,10 @@ class TestAuditFixesAndOptimizations(unittest.TestCase):
         mgr = CoinsFarmManager(client)
 
         resp_405 = MagicMock(status_code=405, text="Method Not Allowed")
-        with patch.object(client, "post", return_value=resp_405):
-            reported = mgr._report_task_complete("BROWSE_ITEM", "task1")
-            self.assertFalse(reported)
-            self.assertIn("https://coins.aliexpress.com/api/finishTask", mgr._dead_urls)
+        with patch.object(client, "get", return_value=resp_405):
+            tasks = mgr.fetch_active_tasks()
+            self.assertEqual(tasks, [])
+            self.assertIn("https://coins.aliexpress.com/api/tasks", mgr._dead_urls)
 
 
 class TestDualChannelCheckin(unittest.TestCase):
@@ -2191,6 +2231,8 @@ class TestDualChannelCheckin(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(mgr.status, "ALREADY_DONE")
             self.assertEqual(mgr.coins_earned, 15, "Coins must not be doubled (15 + 15 = 30) on repeat ALREADY_DONE runs!")
+            self.assertEqual(mgr.coins_earned_this_run, 0, "Coins earned this run must be 0 on repeat ALREADY_DONE runs!")
+            self.assertEqual(mgr.prior_rewards_today, 15, "Prior rewards today should capture the 15 coins from earlier checkin.")
 
     def test_warmup_html_already_done_extracts_coins_from_sign_list(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_123"})
@@ -3388,7 +3430,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             disp.add_summary.assert_called_once()
             summary = disp.add_summary.call_args[0][0]
             self.assertEqual(summary.coins_earned, 55)  # 25 (checkin) + 30 (tasks)
-            self.assertEqual(summary.total_coins, 430)  # 400 (checkin balance) + 30 (task coins)
+            self.assertEqual(summary.total_coins, 400)  # Server balance takes precedence without synthetic addition
             self.assertEqual(summary.tasks_done, 2)
 
     def test_prepare_mtop_params_interactive_task_endpoints_contain_lang_and_currency(self):
@@ -3803,7 +3845,7 @@ class TestDetailedFarmerReporting(unittest.TestCase):
     def tearDown(self):
         CoinsFarmManager.reset_dead_urls()
 
-    def test_account_summary_auto_computes_initial_coins_and_checkin_coins(self):
+    def test_account_summary_does_not_synthetically_compute_initial_coins(self):
         from src.notifications import AccountSummary
         summary = AccountSummary(
             name="Acc_Auto",
@@ -3814,8 +3856,18 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             mobile_coins=15,
             tasks_coins=15
         )
-        self.assertEqual(summary.initial_coins, 950)
+        self.assertIsNone(summary.initial_coins, "Must not synthetically deduce initial_coins from total_coins - coins_earned")
         self.assertEqual(summary.checkin_coins, 35)
+
+        # When initial_coins is explicitly provided from verified warmup
+        summary_explicit = AccountSummary(
+            name="Acc_Explicit",
+            checkin_status="SUCCESS",
+            initial_coins=950,
+            coins_earned=50,
+            total_coins=1000
+        )
+        self.assertEqual(summary_explicit.initial_coins, 950)
 
     def test_account_summary_deduces_checkin_coins_without_channel_breakdown(self):
         from src.notifications import AccountSummary
@@ -3826,7 +3878,7 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             total_coins=1200,
             tasks_coins=25
         )
-        self.assertEqual(summary.initial_coins, 1140)
+        self.assertIsNone(summary.initial_coins)
         self.assertEqual(summary.checkin_coins, 35)
 
     def test_step_summary_contains_detailed_tables_and_breakdown(self):
@@ -3970,6 +4022,7 @@ class TestDetailedFarmerReporting(unittest.TestCase):
                 mgr.total_coins = 500
             mock_fetch.side_effect = fake_fetch
 
+            mgr.initial_coins = 460
             ok = mgr.run_checkin()
             self.assertTrue(ok)
             self.assertEqual(mgr.pc_coins, 25)
@@ -4980,19 +5033,29 @@ class TestCoinsFarmManagerRefinements(unittest.TestCase):
         self.assertFalse(mgr.is_safe_task(task_no_url))
 
     def test_is_safe_task_word_boundaries_dont_block_safe_urls(self):
-        """Перевіряє, що підрядки на зразок card_order або data_binding у URL не блокуються фільтром безпеки."""
+        """Перевіряє, що легітимні підрядки (border_radius, data_binding) не блокуються, але роздільники _/- (card_order, add_to_cart, follow_shop) блокуються."""
         client = AliClient(cookies={})
         mgr = CoinsFarmManager(client)
 
         safe_url_task = {
             "taskTitle": "Explore sponsored items",
             "taskType": 0,
-            "actionUrl": "https://aliexpress.com/category?layout=card_order&binding=data_binding",
+            "actionUrl": "https://aliexpress.com/category?border_radius=4&binding=data_binding",
             "status": "todo"
         }
         self.assertTrue(mgr.is_safe_task(safe_url_task))
 
-        # Але точний збіг забороненого шляху /order або /cart блокується
+        # Підрядки з роздільниками _ або - (card_order, add_to_cart, follow_shop) блокуються фільтром безпеки
+        for unsafe_fragment in ("layout=card_order", "action=add_to_cart", "type=follow_shop"):
+            blocked_task = {
+                "taskTitle": "Explore items",
+                "taskType": 0,
+                "actionUrl": f"https://aliexpress.com/category?{unsafe_fragment}",
+                "status": "todo"
+            }
+            self.assertFalse(mgr.is_safe_task(blocked_task), f"{unsafe_fragment} must be blocked by separator-normalized safety filter")
+
+        # Точний збіг забороненого шляху /order або /cart блокується
         unsafe_url_task = {
             "taskTitle": "Explore items",
             "taskType": 0,
@@ -5374,6 +5437,9 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
         resp_ok = {"ret": ["SUCCESS::接口调用成功"], "data": {"success": True}}
         self.assertTrue(is_checkin_success(resp_ok))
 
+        resp_bare = {"ret": ["SUCCESS::OK"], "data": {}}
+        self.assertFalse(is_checkin_success(resp_bare))
+
     def test_coins_fetch_active_tasks_does_not_default_type_to_zero(self):
         client = AliClient(cookies={"_m_h5_tk": "tk_123"})
         mock_checkin = MagicMock()
@@ -5432,7 +5498,7 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
         from src.coins import _normalize_task_url
         self.assertEqual(_normalize_task_url("//aliexpress.com/item.html"), "https://aliexpress.com/item.html")
         self.assertEqual(_normalize_task_url("https://aliexpress.com/item.html"), "https://aliexpress.com/item.html")
-        self.assertEqual(_normalize_task_url("http://aliexpress.com/item.html"), "http://aliexpress.com/item.html")
+        self.assertEqual(_normalize_task_url("http://aliexpress.com/item.html"), "https://aliexpress.com/item.html")
         self.assertIsNone(_normalize_task_url("aecmd://open?url=test"))
         self.assertIsNone(_normalize_task_url("javascript:alert(1)"))
         self.assertIsNone(_normalize_task_url(""))
@@ -5782,8 +5848,673 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
             mock_post.assert_called_once()
 
 
+class TestMtopTransportModule(unittest.TestCase):
+    def test_generate_mtop_sign_calculates_correct_md5(self):
+        from src.mtop import generate_mtop_sign
+        import hashlib
+        token = "test_token_123"
+        t = "1670000000000"
+        app_key = "12574478"
+        data = '{"scene":"UserCoinNum"}'
+        expected = hashlib.md5(f"{token}&{t}&{app_key}&{data}".encode("utf-8")).hexdigest()
+        self.assertEqual(generate_mtop_sign(token, t, app_key, data), expected)
+
+    def test_mtop_transport_refresh_token(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"aep_usuc_f": "region=KR"})
+        transport = MtopTransport(client)
+        with patch.object(client.session, "get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            transport.refresh_token()
+            mock_get.assert_called_once()
+            args, kwargs = mock_get.call_args
+            self.assertIn("acs.aliexpress.com", args[0])
+            self.assertEqual(kwargs["params"]["api"], "mtop.aliexpress.coin.execute")
+
+    def test_mtop_transport_prepare_params_generates_valid_dict(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        params = transport.prepare_params("mtop.aliexpress.coin.pc.sign.list", data={"test": 1})
+        self.assertIsNotNone(params)
+        self.assertIn("sign", params)
+        self.assertIn("t", params)
+        self.assertEqual(params["api"], "mtop.aliexpress.coin.pc.sign.list")
+        self.assertEqual(params["v"], "1.0")
+
+    def test_mtop_transport_call_detects_waf(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        waf_resp = MagicMock(status_code=200)
+        waf_resp.json.return_value = {"ret": ["FAIL_SYS_USER_VALIDATE::need check"]}
+        with patch.object(client, "post", return_value=waf_resp):
+            res = transport.call("mtop.aliexpress.coin.pc.sign")
+            self.assertTrue(transport.waf_blocked)
+            self.assertIsNone(res)
+
+    def test_is_mutation_api_distinguishes_mutations_from_queries(self):
+        from src.mtop import is_mutation_api, MOBILE_SIGN_EXECUTE_API, MOBILE_RECEIVE_PRIZE_API, TASK_PROCESS_COMPLETE_API, TASK_PROCESS_ISSUE_API
+        # Мутації
+        self.assertTrue(is_mutation_api("mtop.aliexpress.coin.pc.sign"))
+        self.assertTrue(is_mutation_api("mtop.aliexpress.coin.pc.sign.execute"))
+        self.assertTrue(is_mutation_api(MOBILE_SIGN_EXECUTE_API))
+        self.assertTrue(is_mutation_api(MOBILE_RECEIVE_PRIZE_API))
+        self.assertTrue(is_mutation_api(TASK_PROCESS_COMPLETE_API))
+        self.assertTrue(is_mutation_api(TASK_PROCESS_ISSUE_API))
+
+        # Запити на читання (ідемпотентні)
+        self.assertFalse(is_mutation_api("mtop.aliexpress.coin.pc.sign.list"))
+        self.assertFalse(is_mutation_api("mtop.aliexpress.growth.channel.sign.list"))
+        self.assertFalse(is_mutation_api("mtop.aliexpress.growth.channel.sign.querySignList"))
+        self.assertFalse(is_mutation_api("mtop.aliexpress.interactive.task.delivery.query"))
+        self.assertFalse(is_mutation_api("mtop.aliexpress.coin.execute", data={"scene": "UserCoinNum"}))
+
+    def test_mtop_transport_does_not_retry_mutations_on_http_error(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        with patch.object(client, "post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=500, text="Internal Server Error")
+            res = transport.call("mtop.aliexpress.coin.pc.sign", max_retries=3)
+            self.assertIsNone(res)
+            # Для мутації виконується рівно 1 виклик POST, без повторних спроб
+            mock_post.assert_called_once()
+
+    def test_mtop_transport_does_not_retry_mutations_on_exception(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        with patch.object(client, "post", side_effect=Exception("Network Timeout")):
+            res = transport.call("mtop.aliexpress.coin.pc.sign", max_retries=3)
+            self.assertIsNone(res)
+
+    def test_mtop_transport_retries_queries_on_transient_failure(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        fail_resp = MagicMock(status_code=500, text="Temporary Error")
+        ok_resp = MagicMock(status_code=200)
+        ok_resp.json.return_value = {"ret": ["SUCCESS::OK"], "data": {}}
+        with patch.object(client, "post", side_effect=[fail_resp, ok_resp]) as mock_post:
+            res = transport.call("mtop.aliexpress.coin.pc.sign.list", max_retries=2)
+            self.assertIsNotNone(res)
+            self.assertEqual(mock_post.call_count, 2)
+
+    def test_mtop_transport_retries_mutation_on_gateway_token_expiry(self):
+        from src.mtop import MtopTransport
+        client = AliClient(cookies={"_m_h5_tk": "mytoken123_456789"})
+        transport = MtopTransport(client)
+        token_exp_resp = MagicMock(status_code=200)
+        token_exp_resp.json.return_value = {"ret": ["FAIL_SYS_TOKEN_EXPIRED::Session token expired"]}
+        success_resp = MagicMock(status_code=200)
+        success_resp.json.return_value = {"ret": ["SUCCESS::OK"], "data": {"success": True}}
+
+        with patch.object(client, "post", side_effect=[token_exp_resp, success_resp]) as mock_post, \
+             patch.object(transport, "refresh_token") as mock_refresh:
+            res = transport.call("mtop.aliexpress.coin.pc.sign", max_retries=2)
+            self.assertIsNotNone(res)
+            self.assertEqual(mock_post.call_count, 2)
+            mock_refresh.assert_called_once()
+
+
+class TestClientSecurity(unittest.TestCase):
+    def test_client_retry_allowed_methods_excludes_post(self):
+        client = AliClient(cookies={"test": "val"})
+        adapter = client.session.adapters.get("https://")
+        self.assertIsNotNone(adapter)
+        self.assertIsNotNone(adapter.max_retries)
+        allowed = adapter.max_retries.allowed_methods
+        self.assertNotIn("POST", allowed)
+        self.assertNotIn("PUT", allowed)
+        self.assertIn("GET", allowed)
+        self.assertIn("HEAD", allowed)
+        self.assertIn("OPTIONS", allowed)
+
+    def test_client_cookies_have_secure_flag(self):
+        client = AliClient(cookies="test_cookie=secret_value; another_cookie=123")
+        for cookie in client.session.cookies:
+            self.assertTrue(cookie.secure)
+
+
+class TestDoctorAndStateHistory(unittest.TestCase):
+    def test_run_doctor_succeeds_with_valid_setup(self):
+        from src.main import run_doctor
+        with patch("src.main.load_accounts", return_value=[("Account_Test", {"_m_h5_tk": "tk123"})]), \
+             patch("requests.get") as mock_get, \
+             patch("src.notifications.get_usd_to_uah_rate", return_value=41.5):
+            mock_get.return_value = MagicMock(status_code=200)
+            exit_code = run_doctor()
+            self.assertEqual(exit_code, 0)
+
+    def test_save_history_creates_dir_and_prunes(self):
+        import tempfile
+        import shutil
+        from src.main import save_history
+        from src.notifications import AccountSummary
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            summary = AccountSummary(
+                name="Acc1",
+                checkin_status="SUCCESS",
+                streak_days=5,
+                coins_earned=25,
+                coins_earned_this_run=25,
+                prior_rewards_today=0,
+                total_coins=500,
+                balance_verified=True,
+                tasks_done=3,
+                tasks_coins=15,
+                session_valid=True
+            )
+            saved_file = save_history([summary], state_dir=temp_dir)
+            self.assertIsNotNone(saved_file)
+            self.assertTrue(os.path.exists(saved_file))
+
+            with open(saved_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["accounts"]["Acc1"]["coins_earned"], 25)
+            self.assertEqual(data[0]["accounts"]["Acc1"]["total_coins"], 500)
+            self.assertTrue(data[0]["accounts"]["Acc1"]["balance_verified"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_save_history_multiple_runs_same_day_preserves_runs_and_accumulates(self):
+        """Перевіряє, що декілька запусків в один день зберігають усі записи у 'runs' і коректно накопичують результат."""
+        import tempfile
+        import shutil
+        from src.main import save_history
+        from src.notifications import AccountSummary
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Запуск 1: ранок (+25 монет з чекіну, +10 з тасків, баланс 500)
+            summary_run1 = AccountSummary(
+                name="Acc1",
+                checkin_status="SUCCESS",
+                streak_days=5,
+                coins_earned=35,
+                coins_earned_this_run=35,
+                prior_rewards_today=0,
+                total_coins=500,
+                balance_verified=True,
+                tasks_done=2,
+                tasks_coins=10,
+                session_valid=True
+            )
+            save_history([summary_run1], state_dir=temp_dir, run_id="run_morning")
+
+            # Запуск 2: день (чекін ALREADY_DONE, +15 монет з нових тасків, баланс 515)
+            summary_run2 = AccountSummary(
+                name="Acc1",
+                checkin_status="ALREADY_DONE",
+                streak_days=5,
+                coins_earned=35,
+                coins_earned_this_run=15,
+                prior_rewards_today=35,
+                total_coins=515,
+                balance_verified=True,
+                tasks_done=1,
+                tasks_coins=15,
+                session_valid=True
+            )
+            saved_file = save_history([summary_run2], state_dir=temp_dir, run_id="run_afternoon")
+            self.assertIsNotNone(saved_file)
+
+            with open(saved_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.assertEqual(len(data), 1)  # 1 день
+            today_entry = data[0]
+            self.assertEqual(today_entry["runs_count"], 2)
+            self.assertEqual(len(today_entry["runs"]), 2)
+
+            # Перевіряємо знімок першого запуску
+            run1 = today_entry["runs"][0]
+            self.assertEqual(run1["run_id"], "run_morning")
+            self.assertEqual(run1["accounts"]["Acc1"]["coins_earned_this_run"], 35)
+            self.assertEqual(run1["accounts"]["Acc1"]["total_coins"], 500)
+
+            # Перевіряємо знімок другого запуску
+            run2 = today_entry["runs"][1]
+            self.assertEqual(run2["run_id"], "run_afternoon")
+            self.assertEqual(run2["accounts"]["Acc1"]["coins_earned_this_run"], 15)
+            self.assertEqual(run2["accounts"]["Acc1"]["total_coins"], 515)
+
+            # Перевіряємо денний агрегат
+            acc = today_entry["accounts"]["Acc1"]
+            self.assertEqual(acc["coins_earned"], 50)  # 35 + 15
+            self.assertEqual(acc["coins_earned_this_run"], 15)
+            self.assertEqual(acc["total_coins"], 515)
+            self.assertEqual(acc["tasks_done"], 3)  # 2 + 1
+            self.assertEqual(acc["tasks_coins"], 25)  # 10 + 15
+            self.assertEqual(acc["checkin_status"], "SUCCESS")
+            self.assertEqual(acc["runs_count"], 2)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_farm_workflow_cache_preserves_state_on_failure(self):
+        """Перевіряє, що workflow farm.yml використовує actions/cache/save з if: always() для гарантованого збереження."""
+        workflow_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".github", "workflows", "farm.yml")
+        with open(workflow_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("actions/cache/restore@v4", content)
+        self.assertIn("actions/cache/save@v4", content)
+        self.assertIn("if: always()", content)
+
+
+class TestAuditRemediationVerification(unittest.TestCase):
+    """
+    Верифікаційні тести виправлень аудиту:
+    1. Автоматичний апгрейд HTTP до HTTPS у _normalize_task_url()
+    2. Агрегований статус акаунта (OK, PARTIAL, ACTION_REQUIRED, FAILED)
+    3. Балансова верифікація та попередження про непідтверджений бонус
+    4. Суворий структурний whitelist у classify_task() без евристичного підвищення за заголовком
+    5. Нормалізація роздільників у is_safe_task()
+    """
+
+    def test_normalize_task_url_upgrades_http_and_rejects_unsafe(self):
+        from src.coins import _normalize_task_url
+        # HTTP автоматично апгрейдиться до HTTPS
+        self.assertEqual(_normalize_task_url("http://aliexpress.com/item/1.html"), "https://aliexpress.com/item/1.html")
+        # Schemeless URL //aliexpress.com -> https://aliexpress.com
+        self.assertEqual(_normalize_task_url("//aliexpress.com/item/2.html"), "https://aliexpress.com/item/2.html")
+        # HTTPS залишається HTTPS
+        self.assertEqual(_normalize_task_url("https://aliexpress.com/item/3.html"), "https://aliexpress.com/item/3.html")
+        # Небезпечні або непідтримувані протоколи відхиляються
+        self.assertIsNone(_normalize_task_url("javascript:alert(1)"))
+        self.assertIsNone(_normalize_task_url("ftp://aliexpress.com/item"))
+        self.assertIsNone(_normalize_task_url(""))
+        self.assertIsNone(_normalize_task_url(None))
+
+    def test_account_summary_aggregate_status_and_has_problem(self):
+        from src.notifications import AccountSummary
+
+        # 1. OK - все успішно
+        acc_ok = AccountSummary(
+            name="Acc_OK",
+            checkin_status="SUCCESS",
+            tasks_status="SUCCESS",
+            session_valid=True
+        )
+        self.assertEqual(acc_ok.aggregate_status, "OK")
+        self.assertFalse(acc_ok.has_problem)
+
+        # 2. ACTION_REQUIRED - потрібна капча або логін
+        acc_captcha = AccountSummary(
+            name="Acc_Captcha",
+            checkin_status="CAPTCHA_REQUIRED",
+            tasks_status="NONE",
+            session_valid=True
+        )
+        self.assertEqual(acc_captcha.aggregate_status, "ACTION_REQUIRED")
+        self.assertTrue(acc_captcha.has_problem)
+
+        acc_invalid_sess = AccountSummary(
+            name="Acc_Expired",
+            checkin_status="FAILED",
+            tasks_status="NONE",
+            session_valid=False
+        )
+        self.assertEqual(acc_invalid_sess.aggregate_status, "ACTION_REQUIRED")
+        self.assertTrue(acc_invalid_sess.has_problem)
+
+        # 3. PARTIAL - чекін ок, але таски впали або часткові
+        acc_partial = AccountSummary(
+            name="Acc_Partial",
+            checkin_status="SUCCESS",
+            tasks_status="FAILED",
+            session_valid=True
+        )
+        self.assertEqual(acc_partial.aggregate_status, "PARTIAL")
+        self.assertTrue(acc_partial.has_problem)
+
+        # 4. FAILED - все зафейлилось без потреби ручної дії
+        acc_failed = AccountSummary(
+            name="Acc_Failed",
+            checkin_status="FAILED",
+            tasks_status="FAILED",
+            session_valid=True
+        )
+        self.assertEqual(acc_failed.aggregate_status, "FAILED")
+        self.assertTrue(acc_failed.has_problem)
+
+    def test_notifications_display_unverified_balance_warning(self):
+        from src.notifications import NotificationDispatcher, AccountSummary
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "mock_token"
+        dispatcher.telegram_chat_id = "mock_chat"
+
+        acc = AccountSummary(
+            name="Acc_Unverified",
+            checkin_status="SUCCESS",
+            streak_days=5,
+            coins_earned=35,
+            coins_earned_this_run=35,
+            total_coins=1000,
+            tasks_done=2,
+            tasks_coins=15,
+            balance_verified=False,
+            session_valid=True
+        )
+        dispatcher.add_summary(acc)
+
+        # Перевірка Step Summary Markdown
+        summary_md = dispatcher.format_step_summary()
+        self.assertIn("(+15 оцінка)", summary_md)
+        self.assertIn("Пост-баланс не верифіковано сервером", summary_md)
+
+        # Перевірка Telegram тексту
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            dispatcher.send_telegram_notification()
+            sent_text = mock_post.call_args[1]["json"]["text"]
+            self.assertIn("(бонус ~+15 🪙 очікує підтвердження)", sent_text)
+            self.assertIn("Пост-баланс не верифіковано сервером", sent_text)
+
+    def test_classify_task_strict_structural_whitelist_no_heuristic_promotion(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        # Завдання з невідомим типом (99), але в заголовку "Browse items for 15s" -> ПОВИННО бути відхилено
+        unsafe_task = {
+            "taskId": "task_trick",
+            "taskTitle": "Browse items for 15s and win coins",
+            "taskType": 99,
+            "actionUrl": "https://aliexpress.com/item/1.html",
+            "status": "todo"
+        }
+        is_safe, status, reason = mgr.classify_task(unsafe_task)
+        self.assertFalse(is_safe, "Невідомий taskType не повинен підвищуватись до безпечного за заголовком!")
+        self.assertEqual(status, "SKIPPED")
+        self.assertIn("непідтримуваний тип", reason)
+
+    def test_is_safe_task_separator_normalization_blocks_dangerous_actions(self):
+        client = AliClient(cookies={})
+        mgr = CoinsFarmManager(client)
+
+        # Роздільники: _, -, /, ?, &, =, .
+        for url in [
+            "https://aliexpress.com/item/1.html?action=add_to_cart",
+            "https://aliexpress.com/store/123?click=follow_shop",
+            "https://aliexpress.com/order-checkout?type=fast_order",
+            "https://aliexpress.com/payment.do?step=pay",
+            "https://aliexpress.com/buy-now"
+        ]:
+            task = {
+                "taskId": "test_sep",
+                "taskTitle": "View special offer",
+                "taskType": 0,
+                "actionUrl": url,
+                "status": "todo"
+            }
+            self.assertFalse(mgr.is_safe_task(task), f"URL {url} must be blocked by normalized separator regex")
+
+    def test_mtop_and_checkin_import_architecture(self):
+        import src.mtop as mtop_mod
+        import src.checkin as checkin_mod
+        import src.coins as coins_mod
+
+        # Verify relocation of helper functions to src.mtop
+        self.assertTrue(callable(getattr(mtop_mod, "_normalize_res", None)))
+        self.assertTrue(callable(getattr(mtop_mod, "is_captcha_required", None)))
+        self.assertTrue(callable(getattr(mtop_mod, "is_mtop_token_expired", None)))
+        self.assertTrue(callable(getattr(mtop_mod, "generate_mtop_sign", None)))
+
+        # Verify backward compatibility re-exports in src.checkin
+        self.assertIs(getattr(checkin_mod, "_normalize_res", None), mtop_mod._normalize_res)
+        self.assertIs(getattr(checkin_mod, "is_captcha_required", None), mtop_mod.is_captcha_required)
+        self.assertIs(getattr(checkin_mod, "is_mtop_token_expired", None), mtop_mod.is_mtop_token_expired)
+        self.assertIs(getattr(checkin_mod, "generate_mtop_sign", None), mtop_mod.generate_mtop_sign)
+
+        # Verify import in src.coins
+        self.assertIs(getattr(coins_mod, "is_captcha_required", None), mtop_mod.is_captcha_required)
+
+        # Verify shared constants identity between src.mtop and src.checkin
+        self.assertIs(getattr(checkin_mod, "MOBILE_CHECKIN_APIS", None), mtop_mod.MOBILE_CHECKIN_APIS)
+        self.assertIs(getattr(checkin_mod, "MOBILE_SIGN_EXECUTE_API", None), mtop_mod.MOBILE_SIGN_EXECUTE_API)
+        self.assertIs(getattr(checkin_mod, "COIN_MOBILE_REFERER", None), mtop_mod.COIN_MOBILE_REFERER)
+        self.assertIs(getattr(checkin_mod, "MOBILE_ORIGIN", None), mtop_mod.MOBILE_ORIGIN)
+
+    def test_main_save_history_annotations_evaluates_without_name_error(self):
+        import src.main
+        import typing
+
+        # Verify __annotations__ evaluation (NameError prevention on Python 3.11 / PEP 649)
+        annotations = src.main.save_history.__annotations__
+        self.assertIn("return", annotations)
+
+        hints = typing.get_type_hints(src.main.save_history)
+        self.assertIn("return", hints)
+        self.assertEqual(hints["state_dir"], str)
+
+    def test_account_summary_preserves_zero_coins_earned_this_run_on_repeat_checkin(self):
+        from src.notifications import AccountSummary
+        # When checkin is ALREADY_DONE, coins_earned reflects prior reward (e.g. 50),
+        # but coins_earned_this_run is explicitly 0 and prior_rewards_today is 50.
+        summary = AccountSummary(
+            name="Acc_Repeat",
+            checkin_status="ALREADY_DONE",
+            coins_earned=50,
+            coins_earned_this_run=0,
+            prior_rewards_today=50
+        )
+        self.assertEqual(summary.coins_earned_this_run, 0, "Explicit 0 coins_earned_this_run must not be clobbered by coins_earned!")
+        self.assertEqual(summary.prior_rewards_today, 50)
+        self.assertEqual(summary.coins_earned, 50)
+
+        # When coins_earned_this_run is not provided (None), it falls back properly
+        summary_fresh = AccountSummary(
+            name="Acc_Fresh",
+            checkin_status="SUCCESS",
+            coins_earned=25
+        )
+        self.assertEqual(summary_fresh.coins_earned_this_run, 25)
+
+        summary_already = AccountSummary(
+            name="Acc_Prior",
+            checkin_status="ALREADY_DONE",
+            coins_earned=30,
+            prior_rewards_today=30
+        )
+        self.assertEqual(summary_already.coins_earned_this_run, 0)
+
+    def test_coins_farm_browse_tasks_halts_on_403_nav_response(self):
+        client = AliClient(cookies={"sid": "test"})
+        checkin_mgr = CheckinManager(client)
+        mgr = CoinsFarmManager(client, checkin_mgr=checkin_mgr)
+
+        tasks = [
+            {
+                "taskId": "task_403_1",
+                "taskTitle": "Browse item 1",
+                "taskType": 0,
+                "actionUrl": "https://aliexpress.com/item/1.html",
+                "status": "todo",
+                "staySeconds": 15
+            },
+            {
+                "taskId": "task_403_2",
+                "taskTitle": "Browse item 2",
+                "taskType": 0,
+                "actionUrl": "https://aliexpress.com/item/2.html",
+                "status": "todo",
+                "staySeconds": 15
+            }
+        ]
+
+        # First task returns HTTP 403 (Alibaba WAF block on navigation)
+        resp_403 = MagicMock(status_code=403, text="<html>RGV587_RUN_SCRIPT</html>")
+        with patch.object(client, "sleep_random"), \
+             patch.object(mgr, "fetch_active_tasks", return_value=tasks), \
+             patch.object(client, "get", return_value=resp_403):
+            completed = mgr.farm_browse_tasks(count=2)
+            self.assertEqual(completed, 0)
+            self.assertTrue(checkin_mgr.waf_blocked, "403 on nav_url must activate WAF block")
+            self.assertEqual(mgr.status, "CAPTCHA_REQUIRED", "Task status must transition to CAPTCHA_REQUIRED")
+
+
+
+class TestNewCampaignTasks2026(unittest.TestCase):
+    """Тести для нових акційних завдань кампанії монет (пошук, огляд переглянутих, рекламовані 0/6)."""
+
+    def setUp(self):
+        self.client = AliClient(cookies={"_m_h5_tk": "testtoken_12345"})
+        self.checkin_mgr = CheckinManager(self.client)
+        self.mgr = CoinsFarmManager(self.client, checkin_mgr=self.checkin_mgr)
+
+    def test_classify_find_favorite_search_task(self):
+        """'Знайдіть улюблене' (пошук за ключовими словами) класифікується як безпечний пошук."""
+        task = {
+            "taskId": "task_search_1",
+            "taskTitle": "Знайдіть улюблене",
+            "taskType": 1,
+            "timesLimit": 2,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": ""
+        }
+        is_safe, status, reason = self.mgr.classify_task(task)
+        self.assertTrue(is_safe)
+        self.assertEqual(status, "SAFE_SEARCH")
+        self.assertTrue(task.get("_fallback_url", "").startswith("https://www.aliexpress.com/w/wholesale-"))
+
+    def test_classify_recently_viewed_items_task(self):
+        """'Огляд недавно переглянутих товарів' класифікується як безпечний перегляд навіть при cart в URL."""
+        task = {
+            "taskId": "task_recent_1",
+            "taskTitle": "Огляд недавно переглянутих товарів",
+            "taskType": 0,
+            "timesLimit": 1,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": "https://m.aliexpress.com/shopcart/recently_viewed.htm"
+        }
+        is_safe, status, reason = self.mgr.classify_task(task)
+        self.assertTrue(is_safe)
+        self.assertEqual(status, "SAFE_BROWSE")
+
+    def test_classify_promoted_products_6_repetitions(self):
+        """'Перегляньте рекламовані товари' (0/6) класифікується як безпечний перегляд."""
+        task = {
+            "taskId": "task_promoted_1",
+            "taskTitle": "Перегляньте рекламовані товари",
+            "taskType": 0,
+            "timesLimit": 6,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": "https://www.aliexpress.com/p/coin-index/index.html"
+        }
+        is_safe, status, reason = self.mgr.classify_task(task)
+        self.assertTrue(is_safe)
+        self.assertEqual(status, "SAFE_BROWSE")
+
+    def test_classify_add_to_cart_is_unsafe(self):
+        """'Додайте 5 товарів до кошика' категоріально відхиляється як небезпечне завдання."""
+        task = {
+            "taskId": "task_cart_1",
+            "taskTitle": "Додайте 5 товарів до кошика",
+            "taskType": 1,
+            "timesLimit": 5,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": "https://www.aliexpress.com/p/shopcart/index.html"
+        }
+        is_safe, status, reason = self.mgr.classify_task(task)
+        self.assertFalse(is_safe)
+        self.assertEqual(status, "SKIPPED")
+        self.assertIn("Небезпечна дія", reason)
+
+    def test_classify_watering_game_is_skipped(self):
+        """'Поливайте й виграйте' (міні-гра Земля призів) відхиляється як зовнішня міні-гра."""
+        task = {
+            "taskId": "task_game_1",
+            "taskTitle": "Поливайте й виграйте US $0,10",
+            "taskType": 30,
+            "rawType": 30,
+            "status": "todo",
+            "actionUrl": "https://games.aliexpress.com/prize-land.html"
+        }
+        is_safe, status, reason = self.mgr.classify_task(task)
+        self.assertFalse(is_safe)
+        self.assertEqual(status, "SKIPPED")
+        self.assertIn("Зовнішня дія", reason)
+
+    def test_farm_browse_tasks_executes_find_favorite_multi_runs(self):
+        """Виконання пошукового завдання 'Знайдіть улюблене' з 2 повторами (0/2)."""
+        task = {
+            "taskId": "task_search_1",
+            "taskInstanceId": "task_search_1",
+            "taskTitle": "Знайдіть улюблене",
+            "taskType": 1,
+            "timesLimit": 2,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": "",
+            "staySeconds": 1
+        }
+        complete_mtop_res = {
+            "ret": ["SUCCESS::OK"],
+            "data": {
+                "success": True,
+                "result": {
+                    "completeSuccess": True,
+                    "interestIssueResultMap": {
+                        "1": {"interestNum": 6}
+                    }
+                }
+            }
+        }
+        with patch.object(self.client, "sleep_random"), \
+             patch.object(self.mgr, "fetch_active_tasks", return_value=[task]), \
+             patch.object(self.client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(self.checkin_mgr, "_call_mtop", return_value=complete_mtop_res):
+            done = self.mgr.farm_browse_tasks(count=5)
+            self.assertEqual(done, 2)
+            self.assertEqual(self.mgr.task_coins_earned, 12)
+            self.assertEqual(self.mgr.tasks_completed, 2)
+
+    def test_farm_browse_tasks_executes_promoted_products_all_6_runs(self):
+        """Виконання завдання 'Перегляньте рекламовані товари' на всі 6 повторів (0/6)."""
+        task = {
+            "taskId": "task_promoted_1",
+            "taskInstanceId": "task_promoted_1",
+            "taskTitle": "Перегляньте рекламовані товари",
+            "taskType": 0,
+            "timesLimit": 6,
+            "timesJoined": 0,
+            "status": "todo",
+            "actionUrl": "https://www.aliexpress.com/p/coin-index/index.html",
+            "staySeconds": 1
+        }
+        complete_mtop_res = {
+            "ret": ["SUCCESS::OK"],
+            "data": {
+                "success": True,
+                "result": {
+                    "completeSuccess": True,
+                    "interestIssueResultMap": {
+                        "1": {"interestNum": 6}
+                    }
+                }
+            }
+        }
+        with patch.object(self.client, "sleep_random"), \
+             patch.object(self.mgr, "fetch_active_tasks", return_value=[task]), \
+             patch.object(self.client, "get", return_value=MagicMock(status_code=200)), \
+             patch.object(self.checkin_mgr, "_call_mtop", return_value=complete_mtop_res):
+            done = self.mgr.farm_browse_tasks(count=10)
+            self.assertEqual(done, 6)
+            self.assertEqual(self.mgr.task_coins_earned, 36)
+            self.assertEqual(self.mgr.tasks_completed, 6)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

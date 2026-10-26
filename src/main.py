@@ -1,9 +1,12 @@
 import os
 import sys
 import time
+import json
 import random
 import signal
 import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 def _sigterm_handler(signum, frame):
     """Обробник SIGTERM для коректного переривання та збереження результатів."""
@@ -51,6 +54,255 @@ from src.coins import CoinsFarmManager
 from src.notifications import NotificationDispatcher, AccountSummary
 
 
+def save_history(
+    summaries: list,
+    state_dir: str = ".state",
+    run_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Зберігає підсумки виконання за поточний день у .state/history.json (історія останніх 30 днів).
+    Підтримує накопичувальну історію декількох запусків на день:
+    - Зберігає детальний знімок кожного окремого запуску у списку 'runs' без затирання попередніх запусків.
+    - Агрегує денний заробіток та оновлює актуальний баланс на основі останнього підтвердженого результату.
+    """
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        file_path = os.path.join(state_dir, "history.json")
+        history: List[Dict[str, Any]] = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        history = [entry for entry in data if isinstance(entry, dict)]
+            except Exception as e:
+                logger.debug(f"Не вдалося зчитати історію зі {file_path}: {e}")
+
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        now_ts = int(time.time())
+        now_iso = now.isoformat()
+
+        # Знаходимо існуючий запис за сьогодні або створюємо новий
+        today_entry = next((entry for entry in history if entry.get("date") == today_str), None)
+        if today_entry is None:
+            today_entry = {
+                "date": today_str,
+                "timestamp": now_ts,
+                "updated_at": now_iso,
+                "runs_count": 0,
+                "accounts": {},
+                "runs": []
+            }
+            history.append(today_entry)
+        else:
+            today_entry["timestamp"] = now_ts
+            today_entry["updated_at"] = now_iso
+            if "runs" not in today_entry or not isinstance(today_entry["runs"], list):
+                today_entry["runs"] = []
+            if "accounts" not in today_entry or not isinstance(today_entry["accounts"], dict):
+                today_entry["accounts"] = {}
+
+        # Знімок поточного запуску для акаунтів
+        current_run_accounts: Dict[str, Any] = {}
+        for s in summaries:
+            earned_this = getattr(s, "coins_earned_this_run", None)
+            if earned_this is None:
+                earned_this = s.coins_earned or 0
+
+            current_run_accounts[s.name] = {
+                "checkin_status": s.checkin_status,
+                "streak_days": s.streak_days,
+                "coins_earned": s.coins_earned,
+                "coins_earned_this_run": earned_this,
+                "prior_rewards_today": getattr(s, "prior_rewards_today", 0),
+                "total_coins": s.total_coins,
+                "balance_verified": getattr(s, "balance_verified", True),
+                "tasks_done": s.tasks_done,
+                "tasks_coins": s.tasks_coins,
+                "session_valid": s.session_valid,
+                "error_message": s.error_message
+            }
+
+        effective_run_id = run_id or f"run_{now_ts}_{len(today_entry['runs']) + 1}"
+        existing_run_record = next(
+            (r for r in today_entry["runs"] if isinstance(r, dict) and r.get("run_id") == effective_run_id),
+            None
+        )
+        if existing_run_record is not None:
+            existing_run_record["timestamp"] = now_ts
+            existing_run_record["run_time"] = now_iso
+            existing_run_record["accounts"] = current_run_accounts
+        else:
+            run_record = {
+                "run_id": effective_run_id,
+                "timestamp": now_ts,
+                "run_time": now_iso,
+                "accounts": current_run_accounts
+            }
+            today_entry["runs"].append(run_record)
+
+        today_entry["runs_count"] = len(today_entry["runs"])
+
+        # Оновлення агрегованого стану акаунтів за день
+        for s in summaries:
+            acc_name = s.name
+            earned_this = getattr(s, "coins_earned_this_run", None)
+            if earned_this is None:
+                earned_this = s.coins_earned or 0
+
+            prev_acc = today_entry["accounts"].get(acc_name)
+            if prev_acc is None:
+                today_entry["accounts"][acc_name] = {
+                    "checkin_status": s.checkin_status,
+                    "streak_days": s.streak_days,
+                    "coins_earned": earned_this,
+                    "coins_earned_this_run": earned_this,
+                    "prior_rewards_today": getattr(s, "prior_rewards_today", 0),
+                    "total_coins": s.total_coins,
+                    "balance_verified": getattr(s, "balance_verified", True),
+                    "tasks_done": s.tasks_done,
+                    "tasks_coins": s.tasks_coins,
+                    "session_valid": s.session_valid,
+                    "error_message": s.error_message,
+                    "runs_count": 1
+                }
+            else:
+                accumulated_coins = sum(
+                    r.get("accounts", {}).get(acc_name, {}).get("coins_earned_this_run", 0)
+                    for r in today_entry["runs"]
+                    if isinstance(r, dict)
+                )
+                accumulated_tasks_done = sum(
+                    r.get("accounts", {}).get(acc_name, {}).get("tasks_done", 0)
+                    for r in today_entry["runs"]
+                    if isinstance(r, dict)
+                )
+                accumulated_tasks_coins = sum(
+                    r.get("accounts", {}).get(acc_name, {}).get("tasks_coins", 0)
+                    for r in today_entry["runs"]
+                    if isinstance(r, dict)
+                )
+
+                resolved_total = s.total_coins if s.total_coins is not None else prev_acc.get("total_coins")
+                resolved_verified = getattr(s, "balance_verified", False) or (prev_acc.get("balance_verified", False) and s.total_coins is None)
+
+                resolved_status = s.checkin_status
+                if prev_acc.get("checkin_status") == "SUCCESS" and resolved_status == "ALREADY_DONE":
+                    resolved_status = "SUCCESS"
+
+                today_entry["accounts"][acc_name] = {
+                    "checkin_status": resolved_status,
+                    "streak_days": max(s.streak_days or 0, prev_acc.get("streak_days", 0)),
+                    "coins_earned": accumulated_coins,
+                    "coins_earned_this_run": earned_this,
+                    "prior_rewards_today": getattr(s, "prior_rewards_today", 0),
+                    "total_coins": resolved_total,
+                    "balance_verified": resolved_verified,
+                    "tasks_done": accumulated_tasks_done,
+                    "tasks_coins": accumulated_tasks_coins,
+                    "session_valid": s.session_valid,
+                    "error_message": s.error_message or prev_acc.get("error_message"),
+                    "runs_count": len([
+                        r for r in today_entry["runs"]
+                        if isinstance(r, dict) and acc_name in r.get("accounts", {})
+                    ])
+                }
+
+        if len(history) > 30:
+            history = history[-30:]
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+        logger.info(f"💾 Історію виконання збережено у {file_path} (запусків сьогодні: {today_entry['runs_count']})")
+        return file_path
+    except Exception as e:
+        logger.warning(f"⚠️ Не вдалося зберегти стан історії: {e}")
+        return None
+
+
+def run_doctor() -> int:
+    """Діагностика оточення, ключів, підключення до мережі та стану перед запуском."""
+    print("=" * 60)
+    print("🩺 AliExpress Coin Farmer Doctor: Діагностика системи")
+    print("=" * 60)
+    critical_errors = 0
+    warnings = 0
+
+    # 1. Python version
+    py_ver = sys.version_info
+    if py_ver >= (3, 9):
+        print(f"✅ Python: {py_ver.major}.{py_ver.minor}.{py_ver.micro} (підтримується)")
+    else:
+        print(f"❌ Python: {py_ver.major}.{py_ver.minor}.{py_ver.micro} (потрібно >= 3.9)")
+        critical_errors += 1
+
+    # 2. Перевірка секретів акаунтів
+    accounts = load_accounts()
+    if accounts:
+        print(f"✅ Акаунти: знайдено {len(accounts)} валідних конфігурацій")
+        for idx, acc in enumerate(accounts, 1):
+            name, c = acc
+            keys = list(c.keys()) if isinstance(c, dict) else []
+            has_token = "_m_h5_tk" in c if isinstance(c, dict) else "_m_h5_tk" in str(c)
+            token_status = "🟢 token OK" if has_token else "🟡 no _m_h5_tk (буде оновлено через probe)"
+            proxy = getattr(acc, "proxy", None)
+            proxy_info = f", proxy: {proxy.split('@')[-1]}" if proxy else ""
+            print(f"   [{idx}] {name} ({len(keys)} cookies, {token_status}{proxy_info})")
+    else:
+        print("❌ Акаунти: не знайдено жодного акаунту (ALI_COOKIES або ALI_COOKIES_1..N)")
+        critical_errors += 1
+
+    # 3. Перевірка Telegram сповіщень
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    tg_chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if tg_token and tg_chat:
+        masked = tg_token[:5] + "..." + tg_token[-4:] if len(tg_token) > 10 else "***"
+        print(f"✅ Telegram: налаштовано (Bot: {masked}, Chat: {tg_chat})")
+    else:
+        print("🟡 Telegram: сповіщення не налаштовано (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID відсутні)")
+        warnings += 1
+
+    # 4. Перевірка мережевої доступності AliExpress
+    try:
+        import requests
+        resp = requests.get("https://www.aliexpress.com", timeout=5.0)
+        print(f"✅ Мережа AliExpress: доступно (HTTP {resp.status_code})")
+    except Exception as e:
+        print(f"❌ Мережа AliExpress: недоступно ({e})")
+        critical_errors += 1
+
+    # 5. Перевірка курсу валют НБУ
+    try:
+        from src.notifications import get_usd_to_uah_rate
+        rate = get_usd_to_uah_rate(force_refresh=True)
+        print(f"✅ Курс НБУ: успішно отримано (1 USD = {rate:.2f} UAH)")
+    except Exception as e:
+        print(f"🟡 Курс НБУ: помилка ({e}), буде використано базовий курс 42.0")
+        warnings += 1
+
+    # 6. Перевірка прав на запис у .state/
+    try:
+        os.makedirs(".state", exist_ok=True)
+        test_file = os.path.join(".state", ".doctor_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        print("✅ Сховище .state/: доступне для читання та запису")
+    except Exception as e:
+        print(f"❌ Сховище .state/: помилка доступу ({e})")
+        critical_errors += 1
+
+    print("=" * 60)
+    if critical_errors == 0:
+        print(f"🎉 Результат діагностики: ВСЕ ГОТОВО ДО РОБОТИ ({warnings} зауважень)")
+        return 0
+    else:
+        print(f"❌ Результат діагностики: ВИЯВЛЕНО {critical_errors} КРИТИЧНИХ ПОМИЛОК!")
+        return 1
+
+
 def initial_random_jitter():
     """Випадковий зсув запуску для запобігання детекту однакового часу."""
     if SKIP_RANDOM_SLEEP:
@@ -70,10 +322,7 @@ def main():
     setup_logging()
     logger.info("🚀 Запуск AliExpress Coin Farmer")
 
-    # 1. Початковий зсув часу
-    initial_random_jitter()
-
-    # 2. Завантаження акаунтів
+    # 1. Завантаження акаунтів (перевірка наявності акаунтів ДО випадкового зсуву часу)
     accounts = load_accounts()
     if not accounts:
         logger.error("❌ Не знайдено жодного валідного акаунту! Додайте ALI_COOKIES або ALI_COOKIES_1..N у змінні оточення.")
@@ -81,9 +330,16 @@ def main():
 
     logger.info(f"📋 Знайдено акаунтів для обробки: {len(accounts)}")
 
+    # 2. Початковий зсув часу
+    initial_random_jitter()
+
     dispatcher = NotificationDispatcher()
+    current_run_id = f"run_{int(time.time())}_{os.getpid()}"
+    checkin_success_count = 0
     success_count = 0
+    partial_count = 0
     failed_count = 0
+    action_required_count = 0
 
     # 3. Обробка кожного акаунту з ізоляцією помилок
     try:
@@ -110,8 +366,9 @@ def main():
                 coins_done = coins_mgr.farm_browse_tasks(count=MAX_SAFE_TASKS_PER_RUN)
 
                 # 3.3 Оновлюємо актуальний баланс монет після виконання всіх завдань
+                fresh_post_balance = None
                 try:
-                    checkin_mgr._fetch_coin_balance()
+                    fresh_post_balance = checkin_mgr._fetch_coin_balance()
                 except Exception as e:
                     logger.debug(f"[{account_name}] Не вдалося оновити баланс монет після завдань: {e}")
 
@@ -122,32 +379,25 @@ def main():
                 earned_from_checkin = checkin_mgr.coins_earned if isinstance(checkin_mgr.coins_earned, (int, float)) else 0
                 total_earned_today = earned_from_checkin + int(task_coins)
 
-                post_task_coins = checkin_mgr.total_coins if isinstance(checkin_mgr.total_coins, (int, float)) else None
-                if post_task_coins is not None and pre_task_coins is not None:
-                    if post_task_coins > pre_task_coins:
-                        account_total_coins = post_task_coins
-                    else:
-                        account_total_coins = pre_task_coins + int(task_coins)
-                elif post_task_coins is not None:
-                    account_total_coins = post_task_coins
-                elif pre_task_coins is not None:
-                    account_total_coins = pre_task_coins + int(task_coins)
+                if isinstance(fresh_post_balance, (int, float)):
+                    account_total_coins = int(fresh_post_balance)
+                    balance_verified = True
+                elif isinstance(getattr(checkin_mgr, "total_coins", None), (int, float)):
+                    account_total_coins = int(checkin_mgr.total_coins)
+                    balance_verified = (int(task_coins) == 0)
+                elif isinstance(pre_task_coins, (int, float)):
+                    account_total_coins = int(pre_task_coins)
+                    balance_verified = (int(task_coins) == 0)
                 else:
                     account_total_coins = None
+                    balance_verified = False
 
                 if account_total_coins is not None:
                     checkin_mgr.total_coins = account_total_coins
 
-                # Розрахунок початкового балансу до чекіну та завдань
+                # Початковий баланс беремо безпосередньо з checkin_mgr без синтетичних віднімань
                 init_c = getattr(checkin_mgr, "initial_coins", None)
                 initial_balance = int(init_c) if isinstance(init_c, (int, float)) else None
-                if initial_balance is None and account_total_coins is not None:
-                    session_earned = int(task_coins)
-                    if getattr(checkin_mgr, "pc_status", None) == "SUCCESS":
-                        session_earned += int(getattr(checkin_mgr, "pc_coins", 0))
-                    if getattr(checkin_mgr, "mobile_status", None) == "SUCCESS":
-                        session_earned += int(getattr(checkin_mgr, "mobile_coins", 0))
-                    initial_balance = max(0, account_total_coins - session_earned)
 
                 pc_coins_earned = int(getattr(checkin_mgr, "pc_coins", 0)) if isinstance(getattr(checkin_mgr, "pc_coins", 0), (int, float)) else 0
                 mobile_coins_earned = int(getattr(checkin_mgr, "mobile_coins", 0)) if isinstance(getattr(checkin_mgr, "mobile_coins", 0), (int, float)) else 0
@@ -166,13 +416,19 @@ def main():
                 if tasks_already_done == 0 and task_records:
                     tasks_already_done = sum(1 for t in task_records if isinstance(t, dict) and t.get("status") in ("ALREADY_DONE", "DONE"))
 
+                chk_status = checkin_mgr.status if isinstance(getattr(checkin_mgr, "status", None), str) else ("SUCCESS" if checkin_ok else "FAILED")
+                t_status = coins_mgr.status if isinstance(getattr(coins_mgr, "status", None), str) else "NONE"
+
                 # Фіксація звіту по акаунту для сповіщень
                 summary = AccountSummary(
                     name=account_name,
-                    checkin_status=checkin_mgr.status,
+                    checkin_status=chk_status,
                     coins_earned=total_earned_today,
+                    coins_earned_this_run=int(getattr(checkin_mgr, "coins_earned_this_run", 0)) + int(task_coins),
+                    prior_rewards_today=int(getattr(checkin_mgr, "prior_rewards_today", 0)),
                     streak_days=checkin_mgr.streak_days,
                     total_coins=account_total_coins,
+                    balance_verified=balance_verified,
                     tasks_done=coins_done,
                     session_valid=checkin_mgr.session_valid,
                     initial_coins=initial_balance,
@@ -183,6 +439,7 @@ def main():
                     mobile_coins=mobile_coins_earned,
                     mobile_streak=int(getattr(checkin_mgr, "mobile_streak", 0)) if isinstance(getattr(checkin_mgr, "mobile_streak", 0), (int, float)) else 0,
                     checkin_coins=earned_from_checkin,
+                    tasks_status=t_status,
                     tasks_coins=int(task_coins),
                     tasks_already_done=tasks_already_done,
                     tasks_skipped=tasks_skipped,
@@ -190,17 +447,29 @@ def main():
                     task_details=task_records
                 )
                 dispatcher.add_summary(summary)
+                save_history(dispatcher.summaries, run_id=current_run_id)
 
-                # Зараховуємо успіх тільки якщо підтверджено чекін (новий або вже виконаний)
-                if checkin_ok and checkin_mgr.session_valid:
+                # Фіксація підтвердження чекіну для перевірки CI
+                if checkin_ok and getattr(checkin_mgr, "session_valid", True):
+                    checkin_success_count += 1
+
+                # Облік статусу на основі aggregate_status
+                agg_status = summary.aggregate_status
+                if agg_status == "OK":
                     success_count += 1
-                    logger.info(f"✅ [{account_name}] Чекін успішно підтверджено.")
+                    logger.info(f"✅ [{account_name}] Обробка акаунту успішна (OK).")
+                elif agg_status == "PARTIAL":
+                    partial_count += 1
+                    logger.warning(f"⚠️ [{account_name}] Обробка акаунту часткова (PARTIAL).")
+                elif agg_status == "ACTION_REQUIRED":
+                    action_required_count += 1
+                    if checkin_mgr.status == "CAPTCHA_REQUIRED":
+                        logger.warning(f"🧩 [{account_name}] Потрібна дія: чекін заблоковано капчею WAF.")
+                    else:
+                        logger.warning(f"🚨 [{account_name}] Потрібна дія: сесія недійсна, оновіть cookies.")
                 else:
                     failed_count += 1
-                    if checkin_mgr.status == "CAPTCHA_REQUIRED":
-                        logger.warning(f"⚠️ [{account_name}] Чекін заблоковано капчею WAF (потрібно пройти перевірку в браузері).")
-                    else:
-                        logger.warning(f"⚠️ [{account_name}] Чекін не підтверджено (перевірте валідність cookies або наявність капчі).")
+                    logger.warning(f"❌ [{account_name}] Обробка акаунту завершилася зі збоєм (FAILED).")
             except Exception as e:
                 failed_count += 1
                 dispatcher.add_summary(AccountSummary(
@@ -209,6 +478,7 @@ def main():
                     session_valid=False,
                     error_message=str(e)
                 ))
+                save_history(dispatcher.summaries, run_id=current_run_id)
                 logger.error(f"❌ [{account_name}] Критична помилка при обробці: {e}", exc_info=True)
 
             # Пауза між акаунтами, якщо їх декілька
@@ -264,19 +534,24 @@ def main():
             total_earned_all = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in dispatcher.summaries)
             total_checkin_all = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in dispatcher.summaries)
             total_tasks_all = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in dispatcher.summaries)
-            logger.info(f"Успішно: {success_count} | З помилками: {failed_count} | Всього монет: +{total_earned_all} 🪙 (Чекін: +{total_checkin_all}, Таски: +{total_tasks_all})")
+            logger.info(f"Успішно (OK): {success_count} | Частково (PARTIAL): {partial_count} | З помилками (FAILED): {failed_count} | Потрібна дія: {action_required_count} | Всього монет: +{total_earned_all} 🪙 (Чекін: +{total_checkin_all}, Таски: +{total_tasks_all})")
             logger.info(f"=======================================================\n")
 
             # 4. Відправка сповіщень у GitHub Actions Step Summary та Telegram
             dispatcher.dispatch()
 
-    # 5. Якщо всі акаунти зазнали збою, повертаємо код помилки для алерту в CI
-    if failed_count > 0 and success_count == 0:
-        logger.error("❌ Усі акаунти завершилися з помилками!")
+            # 5. Збереження щоденного стану історії для персистентності між запусками
+            save_history(dispatcher.summaries, run_id=current_run_id)
+
+    # 6. Якщо жоден чекін не підтверджено або всі акаунти зазнали збою, повертаємо код помилки для алерту в CI
+    if checkin_success_count == 0 or ((failed_count > 0 or action_required_count > 0) and success_count == 0 and partial_count == 0):
+        logger.error("❌ Усі акаунти завершилися з помилками або жоден чекін не підтверджено!")
         sys.exit(1)
 
     logger.info("🎉 Виконання завдань завершено!")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ("doctor", "--doctor", "-d"):
+        sys.exit(run_doctor())
     main()

@@ -52,7 +52,7 @@ class AliClient:
             total=3,
             backoff_factor=1.5,
             status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST", "HEAD", "OPTIONS"],
+            allowed_methods=["GET", "HEAD", "OPTIONS"],
             raise_on_status=False
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -61,7 +61,7 @@ class AliClient:
 
         cookie_dict = parse_cookie_string(cookies) if isinstance(cookies, str) else (cookies or {})
         for k, v in cookie_dict.items():
-            self.session.cookies.set(k, v, domain=".aliexpress.com", path="/")
+            self.session.cookies.set(k, v, domain=".aliexpress.com", path="/", secure=True)
 
         # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або ALI_PROXY_{suffix}, або глобальної ALI_PROXY
         resolved_proxy = (
@@ -110,7 +110,7 @@ class AliClient:
             if c.name == "aep_usuc_f":
                 self.session.cookies.clear(c.domain, c.path, c.name)
 
-        self.session.cookies.set("aep_usuc_f", new_aep, domain=".aliexpress.com", path="/")
+        self.session.cookies.set("aep_usuc_f", new_aep, domain=".aliexpress.com", path="/", secure=True)
 
     def _init_headers(self):
         headers = {

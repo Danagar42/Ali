@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional, Set, Tuple
 from src.client import AliClient
 from src.checkin import CheckinManager, _collect_nested_dicts, _clean_int
+from src.mtop import is_captcha_required
 from src.config import (
     TASK_SCENE_ID,
     TASK_APP_KEY,
@@ -27,46 +28,100 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-# Список популярних категорій та товарів для симуляції перегляду
-BROWSE_TARGETS = [
-    "https://www.aliexpress.com/category/100003109/women-clothing.html",
-    "https://www.aliexpress.com/category/100003070/men-clothing.html",
-    "https://www.aliexpress.com/category/509/cellphones-telecommunications.html",
-    "https://www.aliexpress.com/category/44/consumer-electronics.html",
-    "https://www.aliexpress.com/category/7/computer-office.html",
-    "https://www.aliexpress.com/category/1509/jewelry-accessories.html",
-    "https://www.aliexpress.com/p/coin-pc-index/index.html",
-]
-
-# Legacy URL для зворотної сумісності з тестами
-REPORT_TASK_URLS = [
-    "https://coins.aliexpress.com/api/finishTask",
-    "https://coins.aliexpress.com/api/task/finish"
-]
-
 # Небезпечні ключові слова — завдання з цими діями КАТЕГОРИЧНО ігноруються
 UNSAFE_KEYWORDS = (
     "order", "buy", "pay", "cart", "purchase",
     "follow", "share", "deal_amount", "bind", "install",
-    "покупка", "купити", "замовлення", "кошик", "підписка"
+    "покупка", "покупки", "покупку", "купити", "купіть",
+    "замовлення", "замовлень", "замовити",
+    "кошик", "кошика", "кошику", "кошиком",
+    "підписка", "підписки", "підписку"
 )
 UNSAFE_REGEX = re.compile(r'(?i)\b(' + '|'.join(re.escape(w) for w in UNSAFE_KEYWORDS) + r')\b')
 
 # Безпечні типи завдань (тільки пасивний перегляд / очікування 15 секунд)
-SAFE_TASK_TYPES = {0, "0", "browse", "browse_item", "search", "view"}
+SAFE_TASK_TYPES = {0, "0", 1, "1", 3, "3", "browse", "browse_item", "search", "view"}
 SAFE_KEYWORDS = (
     "browse", "view", "explore", "visit", "find",
-    "15s", "30s", "15 sec", "секунд", "перегляд", "пошук"
+    "15s", "30s", "15 sec", "секунд", "перегляд", "пошук",
+    "search", "keyword", "recently", "promoted", "recommend",
+    "знайд", "улюблен", "пошук", "переглянут", "рекламован", "нещодавн",
+    "ключов", "огляд"
 )
+
+# Ключові слова для ідентифікації типів завдань без обов'язкового URL
+# Такі завдання мають власну логіку виконання (пошук, перегляд переглянутих тощо)
+SEARCH_TASK_KEYWORDS = (
+    "search", "keyword", "find", "favorite", "discover",
+    "знайд", "улюблен", "пошук", "ключов"
+)
+RECENTLY_VIEWED_TASK_KEYWORDS = (
+    "recently viewed", "recently browsed", "viewed items", "viewed products",
+    "переглянут", "нещодавн", "недавн", "огляд"
+)
+PROMOTED_TASK_KEYWORDS = (
+    "promoted", "recommended", "sponsored", "advertisement", "ads",
+    "рекламован", "рекомендован", "спонсор"
+)
+
+# Резервні URL для завдань без валідного actionUrl
+SEARCH_FALLBACK_KEYWORDS = [
+    "phone case", "earphones", "usb cable", "screen protector",
+    "led lights", "watch band", "laptop stand", "car holder",
+    "wireless charger", "bluetooth speaker"
+]
+SEARCH_URL_TEMPLATE = "https://www.aliexpress.com/w/wholesale-{query}.html"
+RECENTLY_VIEWED_URL = "https://www.aliexpress.com/p/coin-index/index.html"
+PROMOTED_BROWSE_URL = "https://www.aliexpress.com/p/coin-index/index.html"
+def _classify_special_task(task: Dict[str, Any]) -> Optional[str]:
+    """
+    Визначає спеціальний тип завдання за назвою та конфігурацією.
+    Повертає:
+    - 'search' для завдань пошуку за ключовими словами
+    - 'recently_viewed' для огляду переглянутих товарів
+    - 'promoted' для перегляду рекламованих товарів
+    - None якщо завдання не відноситься до спеціальних типів
+    """
+    title = str(task.get("taskTitle", "")).lower()
+    action_url = str(task.get("actionUrl", "")).lower()
+    combined = f"{title} {action_url}"
+
+    if any(kw in combined for kw in SEARCH_TASK_KEYWORDS):
+        return "search"
+    if any(kw in combined for kw in RECENTLY_VIEWED_TASK_KEYWORDS):
+        return "recently_viewed"
+    if any(kw in combined for kw in PROMOTED_TASK_KEYWORDS):
+        return "promoted"
+    return None
+
+
+def _generate_fallback_url(special_type: str) -> str:
+    """Генерує резервний URL для спеціальних завдань без валідного actionUrl."""
+    if special_type == "search":
+        keyword = random.choice(SEARCH_FALLBACK_KEYWORDS)
+        return SEARCH_URL_TEMPLATE.format(query=keyword.replace(" ", "-"))
+    elif special_type == "recently_viewed":
+        return RECENTLY_VIEWED_URL
+    elif special_type == "promoted":
+        return PROMOTED_BROWSE_URL
+    return ""
 
 
 def _normalize_task_url(raw_url: Any) -> Optional[str]:
+    """
+    Нормалізує та валідує URL завдання:
+    - Автоматично підвищує http:// та // до https://
+    - Вимагає обов'язкової HTTPS-схеми
+    - Дозволяє лише хости aliexpress.com або *.aliexpress.com
+    """
     if not raw_url or not isinstance(raw_url, str):
         return None
     u = raw_url.strip()
     if u.startswith("//"):
         u = "https:" + u
-    if not u.startswith(("http://", "https://")):
+    elif u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    if not u.startswith("https://"):
         return None
     parsed = urlparse(u)
     host = (parsed.hostname or "").lower()
@@ -292,6 +347,12 @@ class CoinsFarmManager:
                 ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
 
                 for platform_candidate in candidate_platforms:
+                    if getattr(self.checkin_mgr, "waf_blocked", False) is True:
+                        self.status = "CAPTCHA_REQUIRED"
+                        self.error_message = "Alibaba WAF captcha blocked"
+                        logger.warning(f"[{self.account_name}] 🧩 Зупинка опитування платформ завдань через блокування WAF.")
+                        break
+
                     res = self.checkin_mgr._call_mtop(
                         TASK_DELIVERY_QUERY_API,
                         data={
@@ -313,6 +374,14 @@ class CoinsFarmManager:
                             "fromNew": True
                         }
                     )
+                    if getattr(self.checkin_mgr, "waf_blocked", False) is True or is_captcha_required(res):
+                        self.status = "CAPTCHA_REQUIRED"
+                        self.error_message = "Alibaba WAF captcha blocked"
+                        if self.checkin_mgr:
+                            self.checkin_mgr.waf_blocked = True
+                        logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF / Captcha при запиті завдань. Перериваємо опитування платформ.")
+                        break
+
                     if not res or not isinstance(res, dict):
                         all_no_group_match = False
                         continue
@@ -404,13 +473,13 @@ class CoinsFarmManager:
                                         m_str = json.dumps(m, ensure_ascii=False)
                                     except Exception:
                                         m_str = str(m)
-                                    logger.info(f"[{self.account_name}]   [Завдання #{idx}.{m_idx}] materials: {m_str}")
+                                    logger.debug(f"[{self.account_name}]   [Завдання #{idx}.{m_idx}] materials: {m_str}")
                         else:
                             try:
                                 it_str = json.dumps(it, ensure_ascii=False)
                             except Exception:
                                 it_str = str(it)
-                            logger.info(f"[{self.account_name}]   [Завдання #{idx}] data: {it_str}")
+                            logger.debug(f"[{self.account_name}]   [Завдання #{idx}] data: {it_str}")
 
                     normalized = []
                     # Збираємо пари (it, mat) для обробки
@@ -702,40 +771,87 @@ class CoinsFarmManager:
         if is_claim_only:
             return True, "CLAIM", "Готово до отримання нагороди"
 
+        # Визначаємо спеціальний тип завдання (пошук, огляд переглянутих, рекламовані)
+        special_type = _classify_special_task(task)
+        task_title_str = str(task.get("taskTitle", ""))
+        task_title_lower = task_title_str.lower()
+
+        # Якщо завдання вимагає реальної дії (додати в кошик, купити, замовити тощо)
+        is_explicit_action = any(act in task_title_lower for act in (
+            "додай", "додати", "add to", "купи", "купіть", "купити", "замов", "order", "pay", "оплат", "follow", "підпиш", "підпис"
+        ))
+
         # Перевірка на небезпечні ключові слова через word boundaries (\b)
-        text_repr = " ".join([
-            str(task.get("taskTitle", "")),
+        # Нормалізуємо роздільники (_, -, /, ?, &, =, .) у пробіли, щоб add_to_cart та follow_shop відповідали cart та follow
+        raw_text = " ".join([
+            task_title_str,
             str(task.get("taskType", "")),
             str(task.get("actionUrl", "")),
             str(task.get("actionType", ""))
         ])
-        if UNSAFE_REGEX.search(text_repr):
+        normalized_text = re.sub(r'[\_\-\/\?\&=\.]', ' ', raw_text)
+
+        # Спеціальні завдання пасивного перегляду / пошуку ігнорують слово cart в URL, якщо в заголовку немає прямої дії купівлі чи додавання
+        is_safe_special_browse = bool(special_type and not is_explicit_action)
+        if not is_safe_special_browse and (is_explicit_action or UNSAFE_REGEX.search(normalized_text)):
             logger.debug(f"[{self.account_name}] 🚫 Пропущено небезпечне завдання: {task.get('taskTitle')}")
             return False, "SKIPPED", "Небезпечна дія (покупка/підписка/кошик)"
 
         # Відсіюємо щоденний чекін без URL
-        task_title_lower = str(task.get("taskTitle", "")).lower()
         if "daily check" in task_title_lower and not task.get("actionUrl"):
             logger.debug(f"[{self.account_name}] ℹ️ Пропущено 'Daily check-in' без URL перегляду: {task.get('taskTitle')}")
             return False, "SKIPPED", "Щоденний чекін без URL для перегляду"
 
-        # Для завдань на перегляд обов'язкова наявність actionUrl
-        if not task.get("actionUrl"):
-            return False, "SKIPPED", "Відсутній URL для перегляду"
+        # Для завдань на перегляд обов'язкова наявність валідного HTTPS actionUrl
+        # АЛЕ спеціальні завдання можуть використовувати резервний URL
+        raw_action_url = task.get("actionUrl")
+        action_url = _normalize_task_url(raw_action_url)
+        if not action_url:
+            if special_type:
+                # Генеруємо резервний URL для спеціальних завдань
+                fallback_url = _generate_fallback_url(special_type)
+                if fallback_url:
+                    task["_fallback_url"] = fallback_url
+                    task["_special_type"] = special_type
+                    logger.info(f"[{self.account_name}] 🔄 Завдання '{task.get('taskTitle')}' ({special_type}): використовуємо резервний URL")
+                    if special_type == "search":
+                        return True, "SAFE_SEARCH", "Безпечне завдання пошуку (ключові слова)"
+                    elif special_type == "recently_viewed":
+                        return True, "SAFE_BROWSE", "Безпечне завдання перегляду переглянутих товарів"
+                    else:
+                        return True, "SAFE_BROWSE", "Безпечне завдання перегляду рекламованих товарів"
+            return False, "SKIPPED", "Відсутній або невалідний HTTPS URL для перегляду"
+
+        # Спеціальні завдання з валідним URL — безумовно безпечні
+        if special_type:
+            task["_special_type"] = special_type
+            if special_type == "search":
+                return True, "SAFE_SEARCH", "Безпечне завдання пошуку (ключові слова)"
+            return True, "SAFE_BROWSE", f"Безпечне завдання ({special_type})"
 
         # Справжні завдання перегляду: browseZeroFlag is True або raw_type == 0
         browse_zero = bool(task.get("browseZeroFlag") or cfg.get("browseZeroFlag"))
-        if browse_zero or raw_type in (0, "0") or (raw_type is not None and str(raw_type).strip() == "0"):
-            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
-
+        raw_type_val = task.get("rawType") if task.get("rawType") is not None else task.get("type")
         task_type = task.get("taskType")
-        if task_type in SAFE_TASK_TYPES or (task_type is not None and str(task_type).strip().lower() in SAFE_TASK_TYPES):
+        action_type = task.get("actionType")
+
+        # Визначаємо ефективний тип завдання
+        effective_type = task_type if task_type is not None else (raw_type_val if raw_type_val is not None else action_type)
+        effective_str = str(effective_type).strip().lower() if effective_type is not None else ""
+
+        # Тип 0 або рядкові типи перегляду є безумовно безпечними
+        if browse_zero or effective_type in (0, "0", "browse", "browse_item", "search", "view") or effective_str in ("0", "browse", "browse_item", "search", "view"):
             return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
 
-        text_repr_lower = text_repr.lower()
-        if any(safe_word in text_repr_lower for safe_word in SAFE_KEYWORDS):
-            return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+        # Структурні типи 1, 3 або None (коли тип відсутній у відповіді materials):
+        # Дозволяються ТІЛЬКИ якщо мають ключові слова перегляду у назві або прапорець browseZeroFlag
+        if effective_type in (1, "1", 3, "3", None) or effective_str in ("1", "3"):
+            title_lower = str(task.get("taskTitle", "")).lower()
+            if browse_zero or any(kw in title_lower for kw in SAFE_KEYWORDS):
+                return True, "SAFE_BROWSE", "Безпечне завдання перегляду"
+            return False, "SKIPPED", "Фільтр безпеки: непідтримуваний тип"
 
+        # Будь-які невідомі типи (наприклад 99, 10, 30 тощо) НЕ підвищуються за заголовком
         return False, "SKIPPED", "Фільтр безпеки: непідтримуваний тип"
 
     def is_safe_task(self, task: Dict[str, Any]) -> bool:
@@ -838,7 +954,13 @@ class CoinsFarmManager:
                 safe_tasks.sort(key=lambda t: 0 if (t.get("status") in ("waitforreceive", "wait_for_receive") or t.get("unIssueRecord")) else 1)
 
                 for idx, task in enumerate(safe_tasks, 1):
-                    if self.completed_tasks >= count:
+                    if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                        self.status = "CAPTCHA_REQUIRED"
+                        logger.warning(f"[{self.account_name}] 🧩 Зупинка виконання завдань через блокування WAF/Captcha.")
+                        break
+
+                    attempts = self.tasks_completed + self.tasks_failed
+                    if attempts >= count:
                         self.tasks_skipped += 1
                         t_title = task.get("taskTitle") or f"Завдання {task.get('taskId')}"
                         self.task_records.append({
@@ -858,6 +980,10 @@ class CoinsFarmManager:
                     if is_claim_only:
                         logger.info(f"[{self.account_name}] 🎁 [{idx}/{len(safe_tasks)}] Забирання нагороди за виконане завдання: '{title}'...")
                         coins = self._claim_task_reward(task)
+                        if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                            self.status = "CAPTCHA_REQUIRED"
+                            break
+
                         if coins >= 0:
                             self.completed_tasks += 1
                             self.tasks_completed += 1
@@ -885,27 +1011,59 @@ class CoinsFarmManager:
                     times_joined = _clean_int(task.get("timesJoined", 0))
                     target_runs = max(1, times_limit - times_joined)
 
-                    target_url = task.get("actionUrl")
+                    target_url = task.get("actionUrl") or task.get("_fallback_url", "")
+                    special_type = task.get("_special_type")
                     req_seconds = _clean_int(task.get("staySeconds", 15))
                     if req_seconds <= 0:
                         req_seconds = 15
-                    stay_seconds = max(1, min(req_seconds, 30))
+                    if req_seconds > 30:
+                        self.tasks_skipped += 1
+                        self.task_records.append({
+                            "task_id": task_id,
+                            "title": title,
+                            "status": "SKIPPED",
+                            "coins": 0,
+                            "reason": f"Тривалість перегляду ({req_seconds}с) перевищує безпечний ліміт 30с"
+                        })
+                        logger.info(f"[{self.account_name}] ⏭️ Пропущено завдання '{title}': тривалість {req_seconds}с > 30с.")
+                        continue
+                    stay_seconds = req_seconds
 
                     for run_idx in range(1, target_runs + 1):
-                        if self.completed_tasks >= count:
+                        if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                            self.status = "CAPTCHA_REQUIRED"
+                            break
+
+                        attempts = self.tasks_completed + self.tasks_failed
+                        if attempts >= count:
                             logger.info(f"[{self.account_name}] Досягнуто ліміт завдань на сесію ({count}).")
                             break
 
                         run_label = f" ({run_idx}/{target_runs})" if target_runs > 1 else ""
                         run_task_id = f"{task_id}_{run_idx}" if target_runs > 1 else task_id
 
-                        nav_url = _normalize_task_url(target_url)
+                        # Для пошукових завдань генеруємо різні ключові слова для кожного повтору
+                        effective_url = target_url
+                        if special_type == "search" and run_idx > 1:
+                            keyword = random.choice(SEARCH_FALLBACK_KEYWORDS)
+                            effective_url = SEARCH_URL_TEMPLATE.format(query=keyword.replace(" ", "-"))
+
+                        nav_url = _normalize_task_url(effective_url)
                         if nav_url:
-                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': перегляд сторінки ({stay_seconds} сек) -> {nav_url}...")
+                            type_label = f" [{special_type}]" if special_type else ""
+                            logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання{type_label}] '{title}': перегляд сторінки ({stay_seconds} сек) -> {nav_url}...")
+                            nav_resp = None
                             try:
-                                self.client.get(nav_url)
+                                nav_resp = self.client.get(nav_url)
                             except Exception as e:
                                 logger.debug(f"[{self.account_name}] Помилка відкриття URL завдання: {e}")
+
+                            if nav_resp is not None and (getattr(nav_resp, "status_code", None) == 403 or is_captcha_required(nav_resp)):
+                                if self.checkin_mgr:
+                                    self.checkin_mgr.waf_blocked = True
+                                self.status = "CAPTCHA_REQUIRED"
+                                logger.warning(f"[{self.account_name}] 🧩 Блокування WAF / 403 при переході на {nav_url}!")
+                                break
                         else:
                             logger.info(f"[{self.account_name}] ⏳ [{idx}/{len(safe_tasks)}]{run_label} [Безпечне завдання] '{title}': пасивне очікування ({stay_seconds} сек)...")
 
@@ -914,15 +1072,21 @@ class CoinsFarmManager:
 
                         # Фіксація завершення завдання
                         complete_ok = self._complete_task(task)
+                        if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                            self.status = "CAPTCHA_REQUIRED"
+                            break
+
                         earned = task.get("earnedCoins", 0)
 
                         # Клейм монет викликаємо лише якщо complete_ok успішний і завдання потребує ручного клейму
                         # (issueHandle == 1 або unIssueRecord).
-                        # При ILLEGAL_COMPLETION або неуспішному complete_ok клейм НІКОЛИ не викликається!
                         coins_claimed = -1
                         needs_manual_claim = bool(task.get("unIssueRecord")) or _clean_int(task.get("issueHandle", 0)) == 1
                         if complete_ok and earned <= 0 and needs_manual_claim and not task.get("illegalCompletion"):
                             coins_claimed = self._claim_task_reward(task)
+                            if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                                self.status = "CAPTCHA_REQUIRED"
+                                break
                             if coins_claimed > 0:
                                 earned = coins_claimed
 
@@ -967,11 +1131,24 @@ class CoinsFarmManager:
                         if run_idx < target_runs:
                             self.client.sleep_random(1.5, 3.0)
 
-                self.status = "SUCCESS"
+                    if getattr(self.checkin_mgr, "waf_blocked", False) is True or self.status == "CAPTCHA_REQUIRED":
+                        self.status = "CAPTCHA_REQUIRED"
+                        break
+
+                if self.status != "CAPTCHA_REQUIRED":
+                    if self.tasks_failed > 0:
+                        self.status = "PARTIAL" if self.tasks_completed > 0 else "FAILED"
+                    elif self.tasks_completed > 0:
+                        self.status = "SUCCESS"
+                    elif self.tasks_already_done > 0:
+                        self.status = "ALREADY_DONE"
+                    else:
+                        self.status = "SUCCESS"
                 return self.completed_tasks
             else:
                 logger.info(f"[{self.account_name}] ℹ️ Немає доступних безпечних завдань для виконання.")
-                self.status = "SUCCESS"
+                if self.status not in ("FAILED", "CAPTCHA_REQUIRED"):
+                    self.status = "SKIPPED" if not active_tasks else "SUCCESS"
                 if not active_tasks:
                     self.tasks_skipped += 1
                     self.task_records.append({
@@ -982,65 +1159,10 @@ class CoinsFarmManager:
                         "reason": "Список завдань на сьогодні порожній"
                     })
                 return 0
-
-        # 2. Якщо checkin_mgr відсутній (legacy fallback для ізольованих тестів)
-        if all(u in self._dead_urls for u in REPORT_TASK_URLS):
-            logger.debug(f"[{self.account_name}] Усі ендпоінти завершення завдань неактивні, пропускаємо перегляд сторінок.")
+        else:
+            logger.warning(f"[{self.account_name}] ⚠️ checkin_mgr відсутній, MTOP завдання недоступні.")
+            self.status = "SKIPPED"
             return 0
-
-        logger.info(f"[{self.account_name}] 🛍️ Фонова симуляція перегляду каталогу (к-ть: {count})...")
-        active_tasks = self.fetch_active_tasks()
-        browse_task_ids = [
-            t.get("taskId") for t in active_tasks
-            if isinstance(t, dict) and t.get("taskId") and "browse" in str(t.get("taskType", "")).lower() and not t.get("completed", False)
-        ]
-
-        targets = random.sample(BROWSE_TARGETS, min(count, len(BROWSE_TARGETS)))
-        completed_or_acknowledged = 0
-
-        for idx, url in enumerate(targets, 1):
-            if all(u in self._dead_urls for u in REPORT_TASK_URLS):
-                logger.debug(f"[{self.account_name}] Усі ендпоінти завершення завдань стали неактивними, зупиняємо перегляд сторінок.")
-                break
-
-            logger.info(f"[{self.account_name}] [{idx}/{len(targets)}] Перегляд: {url}")
-            resp = self.client.get(url)
-            if resp and resp.status_code == 200:
-                logger.debug(f"[{self.account_name}] Сторінку успішно відвідано.")
-            else:
-                status = resp.status_code if resp else "Error"
-                logger.warning(f"[{self.account_name}] Не вдалося завантажити {url} (статус: {status})")
-
-            current_task_id = browse_task_ids.pop(0) if browse_task_ids else f"BROWSE_{idx}"
-            reported = self._report_task_complete(
-                task_type="BROWSE_ITEM",
-                task_id=current_task_id,
-                scene_id="browse_channel_coin"
-            )
-            if reported:
-                completed_or_acknowledged += 1
-                self.tasks_completed += 1
-                self.task_records.append({
-                    "task_id": current_task_id,
-                    "title": f"Перегляд: {url}",
-                    "status": "COMPLETED",
-                    "coins": 0,
-                    "reason": "Legacy симуляція зарахована"
-                })
-            else:
-                self.tasks_failed += 1
-                self.task_records.append({
-                    "task_id": current_task_id,
-                    "title": f"Перегляд: {url}",
-                    "status": "FAILED",
-                    "coins": 0,
-                    "reason": "Legacy ендпоінт відхилив"
-                })
-
-        self.completed_tasks = completed_or_acknowledged
-        if completed_or_acknowledged > 0:
-            self.status = "SUCCESS"
-        return completed_or_acknowledged
 
     def _complete_task(self, task: Dict[str, Any]) -> bool:
         """
@@ -1090,7 +1212,7 @@ class CoinsFarmManager:
                 res_str = json.dumps(res, ensure_ascii=False)
             except Exception:
                 res_str = str(res)
-            logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _complete_task ({task_id}): {res_str}")
+            logger.debug(f"[{self.account_name}] 📥 Відповідь MTOP _complete_task ({task_id}): {res_str}")
             if res and isinstance(res, dict):
                 res_data = res.get("data") if isinstance(res.get("data"), dict) else {}
                 res_result = res_data.get("result") if isinstance(res_data.get("result"), dict) else {}
@@ -1185,7 +1307,7 @@ class CoinsFarmManager:
                 res_str = json.dumps(res, ensure_ascii=False)
             except Exception:
                 res_str = str(res)
-            logger.info(f"[{self.account_name}] 📥 Відповідь MTOP _claim_task_reward ({task_id}): {res_str}")
+            logger.debug(f"[{self.account_name}] 📥 Відповідь MTOP _claim_task_reward ({task_id}): {res_str}")
             if res and isinstance(res, dict):
                 res_data = res.get("data") if isinstance(res.get("data"), dict) else {}
                 res_result = res_data.get("result") if isinstance(res_data.get("result"), dict) else {}
@@ -1207,59 +1329,3 @@ class CoinsFarmManager:
             logger.error(f"[{self.account_name}] ❌ Виняток під час _claim_task_reward: {e}")
 
         return -1
-
-    def _report_task_complete(
-        self,
-        task_type: str = "BROWSE_ITEM",
-        task_id: Optional[str] = None,
-        scene_id: Optional[str] = "browse_channel_coin"
-    ) -> bool:
-        """Legacy метод репорту для зворотної сумісності."""
-        report_urls = REPORT_TASK_URLS
-        if all(u in self._dead_urls for u in report_urls):
-            return False
-
-        payload: Dict[str, Any] = {
-            "taskType": task_type,
-            "channel": "COIN"
-        }
-        if task_id:
-            payload["taskId"] = task_id
-        if scene_id:
-            payload["sceneId"] = scene_id
-
-        for url in report_urls:
-            if url in self._dead_urls:
-                continue
-            try:
-                resp = self.client.post(url, json=payload)
-                if not resp or resp.status_code != 200:
-                    if resp is None or resp.status_code in (404, 405, 410, 500, 502, 503, 504):
-                        self._dead_urls.add(url)
-                    continue
-
-                raw_ct = ""
-                if hasattr(resp, "headers") and hasattr(resp.headers, "get"):
-                    ct_val = resp.headers.get("content-type", "")
-                    if isinstance(ct_val, str):
-                        raw_ct = ct_val.lower()
-
-                if raw_ct and "json" not in raw_ct:
-                    self._dead_urls.add(url)
-                    continue
-
-                try:
-                    data = resp.json()
-                    if not isinstance(data, dict):
-                        continue
-                    if data.get("hasHandle") is False or "can't fund" in str(data.get("errorMessage", "")).lower():
-                        continue
-
-                    if _is_task_already_done(data) or _is_task_success(data):
-                        return True
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.debug(f"[{self.account_name}] Помилка legacy репорту таски: {e}")
-
-        return False

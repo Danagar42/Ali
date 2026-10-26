@@ -146,50 +146,88 @@ def load_accounts() -> List[AccountConfig]:
                 for acc_id, c_data in parsed_data.items():
                     name = f"Account_{acc_id}" if not str(acc_id).startswith("Account_") else str(acc_id)
                     proxy = None
+                    c_dict = {}
                     if isinstance(c_data, dict):
                         if "cookies" in c_data:
                             raw_cookies = c_data["cookies"]
-                            proxy = c_data.get("proxy")
-                            c_dict = parse_cookie_string(raw_cookies) if isinstance(raw_cookies, str) else (raw_cookies if isinstance(raw_cookies, dict) else {})
+                            proxy_val = c_data.get("proxy")
+                            if proxy_val is not None:
+                                if isinstance(proxy_val, str) and proxy_val.strip():
+                                    proxy = proxy_val.strip()
+                                else:
+                                    logger.warning(f"⚠️ [{name}] Поле 'proxy' має бути рядком, отримано {type(proxy_val).__name__}. Проксі проігноровано.")
+                            if isinstance(raw_cookies, str):
+                                c_dict = parse_cookie_string(raw_cookies)
+                            elif isinstance(raw_cookies, dict):
+                                c_dict = {str(k): str(v) for k, v in raw_cookies.items()}
+                            else:
+                                logger.error(f"❌ [{name}] Поле 'cookies' має бути рядком або словником, отримано {type(raw_cookies).__name__}.")
+                                continue
                         else:
-                            c_dict = c_data
+                            c_dict = {str(k): str(v) for k, v in c_data.items()}
                     elif isinstance(c_data, str):
                         c_dict = parse_cookie_string(c_data)
                     else:
-                        c_dict = {}
+                        logger.error(f"❌ [{name}] Дані акаунта мають непідтримуваний тип: {type(c_data).__name__}.")
+                        continue
 
-                    if c_dict:
-                        fp = _cookie_fingerprint(c_dict)
-                        if fp not in seen_fingerprints:
-                            seen_fingerprints.add(fp)
-                            acc = AccountConfig(name, c_dict, proxy=proxy)
-                            accounts.append(acc)
-                            validate_aliexpress_cookies(name, c_dict)
-                            logger.info(f"Завантажено акаунт із JSON: {name}")
+                    if not c_dict:
+                        logger.error(f"❌ [{name}] Відхилено: порожні cookies або не вдалося розпарсити.")
+                        continue
+
+                    fp = _cookie_fingerprint(c_dict)
+                    if fp not in seen_fingerprints:
+                        seen_fingerprints.add(fp)
+                        acc = AccountConfig(name, c_dict, proxy=proxy)
+                        accounts.append(acc)
+                        validate_aliexpress_cookies(name, c_dict)
+                        logger.info(f"Завантажено акаунт із JSON: {name}")
+                    else:
+                        logger.warning(f"⚠️ [{name}] Пропущено: дублікат cookies уже завантажено.")
             elif isinstance(parsed_data, list):
                 for idx, c_data in enumerate(parsed_data, 1):
                     name = f"Account_JSON_{idx}"
                     proxy = None
+                    c_dict = {}
                     if isinstance(c_data, dict):
                         if "cookies" in c_data:
                             raw_cookies = c_data["cookies"]
-                            proxy = c_data.get("proxy")
-                            c_dict = parse_cookie_string(raw_cookies) if isinstance(raw_cookies, str) else (raw_cookies if isinstance(raw_cookies, dict) else {})
+                            proxy_val = c_data.get("proxy")
+                            if proxy_val is not None:
+                                if isinstance(proxy_val, str) and proxy_val.strip():
+                                    proxy = proxy_val.strip()
+                                else:
+                                    logger.warning(f"⚠️ [{name}] Поле 'proxy' має бути рядком, отримано {type(proxy_val).__name__}. Проксі проігноровано.")
+                            if isinstance(raw_cookies, str):
+                                c_dict = parse_cookie_string(raw_cookies)
+                            elif isinstance(raw_cookies, dict):
+                                c_dict = {str(k): str(v) for k, v in raw_cookies.items()}
+                            else:
+                                logger.error(f"❌ [{name}] Поле 'cookies' має бути рядком або словником, отримано {type(raw_cookies).__name__}.")
+                                continue
                         else:
-                            c_dict = c_data
+                            c_dict = {str(k): str(v) for k, v in c_data.items()}
                     elif isinstance(c_data, str):
                         c_dict = parse_cookie_string(c_data)
                     else:
-                        c_dict = {}
+                        logger.error(f"❌ [{name}] Дані акаунта мають непідтримуваний тип: {type(c_data).__name__}.")
+                        continue
 
-                    if c_dict:
-                        fp = _cookie_fingerprint(c_dict)
-                        if fp not in seen_fingerprints:
-                            seen_fingerprints.add(fp)
-                            acc = AccountConfig(name, c_dict, proxy=proxy)
-                            accounts.append(acc)
-                            validate_aliexpress_cookies(name, c_dict)
-                            logger.info(f"Завантажено акаунт із JSON: {name}")
+                    if not c_dict:
+                        logger.error(f"❌ [{name}] Відхилено: порожні cookies або не вдалося розпарсити.")
+                        continue
+
+                    fp = _cookie_fingerprint(c_dict)
+                    if fp not in seen_fingerprints:
+                        seen_fingerprints.add(fp)
+                        acc = AccountConfig(name, c_dict, proxy=proxy)
+                        accounts.append(acc)
+                        validate_aliexpress_cookies(name, c_dict)
+                        logger.info(f"Завантажено акаунт із JSON: {name}")
+                    else:
+                        logger.warning(f"⚠️ [{name}] Пропущено: дублікат cookies уже завантажено.")
+            else:
+                logger.error(f"❌ Невалідний JSON у конфігурації акаунтів: очікувався dict або list, отримано {type(parsed_data).__name__}")
         except Exception as e:
             logger.warning(f"Не вдалося розібрати JSON зі змінної акаунтів: {e}")
 
