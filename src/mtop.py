@@ -249,7 +249,7 @@ class MtopTransport:
             or "growth." in api
         )
         if is_task_api:
-            asac_val = ASAC_TASK_CAMPAIGN
+            asac_val = (data.get("asac") if isinstance(data, dict) and data.get("asac") else ASAC_TASK_CAMPAIGN)
         elif is_mobile:
             asac_val = ASAC_MOBILE_CAMPAIGN
         else:
@@ -453,7 +453,7 @@ class MtopTransport:
         if is_task_api:
             referer = "https://m.aliexpress.com/"
             origin = "https://m.aliexpress.com"
-            asac_header = ASAC_TASK_CAMPAIGN
+            asac_header = (data.get("asac") if isinstance(data, dict) and data.get("asac") else ASAC_TASK_CAMPAIGN)
         elif is_mobile_api:
             referer = COIN_MOBILE_REFERER
             origin = MOBILE_ORIGIN

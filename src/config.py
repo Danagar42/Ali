@@ -138,10 +138,11 @@ ASAC_CAMPAIGN = "2E227052O27XFLCLMIUIOA"
 ASAC_MOBILE_CAMPAIGN = "2E2280406IM61M8MG1F2FB"
 
 # Інтерактивна платформа завдань AliExpress (Coin Tasks)
-TASK_SCENE_ID = _env_int("TASK_SCENE_ID", 149)
+# Сцена 974 (DOUBLE_11 11.11 Boost), 944 (CoinUpdate26), 983 (Black Friday)
+TASK_SCENE_ID = _env_int("TASK_SCENE_ID", 974)
 TASK_APP_KEY = os.getenv("TASK_APP_KEY", "llcvfnh8tuknrw80cgstljy4h2y7i1rh")
 PROJECT_APP_KEY = os.getenv("PROJECT_APP_KEY", os.getenv("TASK_APP_KEY", "llcvfnh8tuknrw80cgstljy4h2y7i1rh"))
-ASAC_TASK_CAMPAIGN = os.getenv("ASAC_TASK_CAMPAIGN", "2E247188QJLF705B9VMWWJ")
+ASAC_TASK_CAMPAIGN = os.getenv("ASAC_TASK_CAMPAIGN", "2E269290M9445GTGEDG4ON")
 TASK_DELIVERY_QUERY_API = "mtop.aliexpress.interactive.task.delivery.query"
 TASK_PROCESS_COMPLETE_API = "mtop.aliexpress.interactive.task.process.complete"
 TASK_PROCESS_ISSUE_API = "mtop.aliexpress.interactive.task.process.issue"
@@ -154,5 +155,16 @@ TASK_UMID_TOKEN = os.getenv("TASK_UMID_TOKEN", "T2gA1jIALVYecdoa1onvC24McgCfk9c4
 TASK_BX_UMIDTOKEN = os.getenv("TASK_BX_UMIDTOKEN", "T2gAJf8iJkyJCy1iYOyIw3Mx_GChuoEw_ds8gFo3GJfC_qzqm2SJRF4_f2cB9u2NtoI=")
 TASK_MTOP_APP_KEY = os.getenv("TASK_MTOP_APP_KEY", "24815441")
 TASK_PLATFORM_CANDIDATES = ["android", "wireless", "h5", "app", "iOS"]
+
+# Відомі робочі конфігурації сцен із поточного JS-бандлу додатка AliExpress
+TASK_SCENE_CANDIDATES: List[Dict[str, Any]] = [
+    {"sceneId": 974, "asac": "2E269290M9445GTGEDG4ON", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "11.11 / DOUBLE_11"},
+    {"sceneId": 944, "asac": "2E247188QJLF705B9VMWWJ", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "CoinUpdate26"},
+    {"sceneId": 983, "asac": "2E269290M9445GTGEDG4ON", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "BLACK_FRIDAY"},
+    {"sceneId": 767, "asac": "2E25A20WBNH8B9RP0MQNVC", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "ChannelTask_767"},
+    {"sceneId": 740, "asac": "2E25A20WBNH8B9RP0MQNVC", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "ChannelTask_740"},
+    {"sceneId": 149, "asac": "2E247188QJLF705B9VMWWJ", "appKey": "llcvfnh8tuknrw80cgstljy4h2y7i1rh", "name": "Legacy_149"}
+]
+
 MAX_SAFE_TASKS_PER_RUN = _env_int("MAX_SAFE_TASKS_PER_RUN", 25)
 

@@ -14,6 +14,7 @@ from src.config import (
     ASAC_MOBILE_CAMPAIGN,
     ASAC_TASK_CAMPAIGN,
     PROJECT_APP_KEY,
+    TASK_SCENE_ID,
     TASK_DELIVERY_QUERY_API,
     TASK_PROCESS_COMPLETE_API,
     TASK_PROCESS_ISSUE_API,
@@ -3448,7 +3449,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(data_obj.get("currency"), "UAH")
             self.assertEqual(data_obj.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj.get("projectAppKey"), PROJECT_APP_KEY)
-            self.assertEqual(data_obj.get("sceneId"), 149)
+            self.assertEqual(data_obj.get("sceneId"), TASK_SCENE_ID)
 
             # Test string data
             params_str = mgr._prepare_mtop_params(api=api, data=json.dumps({"taskId": "123"}))
@@ -3461,7 +3462,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(data_obj2.get("currency"), "UAH")
             self.assertEqual(data_obj2.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_obj2.get("projectAppKey"), PROJECT_APP_KEY)
-            self.assertEqual(data_obj2.get("sceneId"), 149)
+            self.assertEqual(data_obj2.get("sceneId"), TASK_SCENE_ID)
 
             # Test None data for ALL interactive task APIs
             params_none = mgr._prepare_mtop_params(api=api, data=None)
@@ -3474,7 +3475,7 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(data_none_obj.get("currency"), "UAH")
             self.assertEqual(data_none_obj.get("asac"), ASAC_TASK_CAMPAIGN)
             self.assertEqual(data_none_obj.get("projectAppKey"), PROJECT_APP_KEY)
-            self.assertEqual(data_none_obj.get("sceneId"), 149)
+            self.assertEqual(data_none_obj.get("sceneId"), TASK_SCENE_ID)
 
             # Test empty dict and empty string
             for empty_val in ({}, ""):
@@ -3504,8 +3505,8 @@ class TestSafeCoinTasksAutomation(unittest.TestCase):
             self.assertEqual(payload["_currency"], "UAH")
             self.assertEqual(payload["lang"], "en_US")
             self.assertEqual(payload["currency"], "UAH")
-            self.assertEqual(payload["taskSceneId"], 149)
-            self.assertEqual(payload["sceneId"], 149)
+            self.assertEqual(payload["taskSceneId"], TASK_SCENE_ID)
+            self.assertEqual(payload["sceneId"], TASK_SCENE_ID)
             self.assertTrue(payload["fromNew"])
 
     def test_fetch_active_tasks_nested_mtop_structure_and_custom_locale(self):
@@ -6510,6 +6511,47 @@ class TestNewCampaignTasks2026(unittest.TestCase):
             self.assertEqual(done, 6)
             self.assertEqual(self.mgr.task_coins_earned, 36)
             self.assertEqual(self.mgr.tasks_completed, 6)
+
+
+    def test_fetch_active_tasks_fallback_on_scene_not_exist(self):
+        """Якщо сконфігурована сцена повертає E2-14-1 (scene not exist), скрипт перемикається на кандидата 11.11 (974)."""
+        scene_149_error = {
+            "ret": ["E2-14-1::scene not exist."],
+            "data": {"errorCode": "E2-14-1", "errorMsg": "scene not exist."}
+        }
+        scene_974_success = {
+            "ret": ["SUCCESS::OK"],
+            "data": {
+                "success": True,
+                "result": [
+                    {
+                        "taskId": "task_1111_promo",
+                        "taskTitle": "Перегляньте рекламовані товари",
+                        "materials": [{
+                            "actionUrl": "https://www.aliexpress.com/p/coin-index/index.html",
+                            "staySeconds": 15,
+                            "type": 0,
+                            "timesLimit": 6,
+                            "timesJoined": 0
+                        }]
+                    }
+                ]
+            }
+        }
+
+        # Перший виклик повертає помилку старої сцени, другий виклик на сцені 974 успішний
+        def side_effect(api, data=None):
+            if data and data.get("sceneId") == 149:
+                return scene_149_error
+            return scene_974_success
+
+        with patch("src.coins.TASK_SCENE_ID", 149), \
+             patch.object(self.checkin_mgr, "_call_mtop", side_effect=side_effect):
+            tasks = self.mgr.fetch_active_tasks()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["taskId"], "task_1111_promo")
+            self.assertEqual(self.mgr.working_scene_id, 974)
+            self.assertEqual(self.mgr.working_asac, "2E269290M9445GTGEDG4ON")
 
 
 if __name__ == "__main__":

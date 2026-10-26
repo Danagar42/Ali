@@ -23,6 +23,7 @@ from src.config import (
     TASK_PLATFORM,
     TASK_PLATFORM_CANDIDATES,
     TASK_UMID_TOKEN,
+    TASK_SCENE_CANDIDATES,
     MAX_SAFE_TASKS_PER_RUN
 )
 
@@ -218,6 +219,25 @@ def _is_no_group_match(res: Any) -> bool:
     return False
 
 
+def _is_scene_error(res: Any) -> bool:
+    """
+    Визначає, чи повернув MTOP помилку неіснуючої або застарілої сцени (E2-14-1::scene not exist тощо).
+    """
+    if not isinstance(res, dict):
+        return False
+    ret = res.get("ret")
+    ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+    if "E2-14-1" in ret_str or "scene not exist" in ret_str.lower():
+        return True
+    data_field = res.get("data")
+    if isinstance(data_field, dict):
+        if str(data_field.get("errorCode", "")).strip() == "E2-14-1":
+            return True
+        if "scene not exist" in str(data_field.get("errorMsg", "")).lower():
+            return True
+    return False
+
+
 def _extract_user_locale_params(client: Optional[AliClient] = None) -> Tuple[str, str, str]:
     """
     Визначає (locale, currency, lang) для запитів завдань.
@@ -313,6 +333,9 @@ class CoinsFarmManager:
         self.status = "INIT"
         self.error_message: Optional[str] = None
         self.working_platform: str = TASK_PLATFORM
+        self.working_scene_id: int = TASK_SCENE_ID
+        self.working_asac: str = ASAC_TASK_CAMPAIGN
+        self.working_app_key: str = TASK_APP_KEY
         self.tasks_completed: int = 0
         self.tasks_already_done: int = 0
         self.tasks_skipped: int = 0
@@ -339,101 +362,132 @@ class CoinsFarmManager:
                     if p and p not in candidate_platforms:
                         candidate_platforms.append(p)
 
+                # Формуємо список кандидатів сцен та кампаній: спочатку налаштована сцена, потім відомі з бандлу AliExpress
+                candidate_scenes: List[Dict[str, Any]] = []
+                configured_scene = {
+                    "sceneId": TASK_SCENE_ID,
+                    "asac": ASAC_TASK_CAMPAIGN,
+                    "appKey": TASK_APP_KEY,
+                    "name": f"Configured ({TASK_SCENE_ID})"
+                }
+                candidate_scenes.append(configured_scene)
+                for sc in TASK_SCENE_CANDIDATES:
+                    if sc.get("sceneId") != TASK_SCENE_ID:
+                        candidate_scenes.append(sc)
+
                 mtop_res: Optional[Dict[str, Any]] = None
                 working_platform: Optional[str] = None
                 all_no_group_match = True
+                last_error_str: Optional[str] = None
 
                 locale, currency, lang = _extract_user_locale_params(self.client)
                 ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
 
-                for platform_candidate in candidate_platforms:
+                for scene_candidate in candidate_scenes:
                     if getattr(self.checkin_mgr, "waf_blocked", False) is True:
-                        self.status = "CAPTCHA_REQUIRED"
-                        self.error_message = "Alibaba WAF captcha blocked"
-                        logger.warning(f"[{self.account_name}] 🧩 Зупинка опитування платформ завдань через блокування WAF.")
                         break
 
-                    res = self.checkin_mgr._call_mtop(
-                        TASK_DELIVERY_QUERY_API,
-                        data={
-                            "ua": ua_val,
-                            "umidToken": TASK_UMID_TOKEN,
-                            "umidTokenType": "TOKEN",
-                            "_lang": lang,
-                            "_currency": currency,
-                            "lang": lang,
-                            "currency": currency,
-                            "locale": locale,
-                            "ttid": TASK_TTID,
-                            "platform": platform_candidate,
-                            "sceneId": TASK_SCENE_ID,
-                            "taskSceneId": TASK_SCENE_ID,
-                            "projectAppKey": PROJECT_APP_KEY,
-                            "taskAppKey": TASK_APP_KEY,
-                            "asac": ASAC_TASK_CAMPAIGN,
-                            "fromNew": True
-                        }
-                    )
-                    if getattr(self.checkin_mgr, "waf_blocked", False) is True or is_captcha_required(res):
-                        self.status = "CAPTCHA_REQUIRED"
-                        self.error_message = "Alibaba WAF captcha blocked"
-                        if self.checkin_mgr:
-                            self.checkin_mgr.waf_blocked = True
-                        logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF / Captcha при запиті завдань. Перериваємо опитування платформ.")
-                        break
+                    cur_scene_id = scene_candidate.get("sceneId", TASK_SCENE_ID)
+                    cur_asac = scene_candidate.get("asac", ASAC_TASK_CAMPAIGN)
+                    cur_app_key = scene_candidate.get("appKey", TASK_APP_KEY)
+                    scene_name = scene_candidate.get("name", str(cur_scene_id))
 
-                    if not res or not isinstance(res, dict):
-                        all_no_group_match = False
-                        continue
+                    for platform_candidate in candidate_platforms:
+                        if getattr(self.checkin_mgr, "waf_blocked", False) is True:
+                            self.status = "CAPTCHA_REQUIRED"
+                            self.error_message = "Alibaba WAF captcha blocked"
+                            logger.warning(f"[{self.account_name}] 🧩 Зупинка опитування завдань через блокування WAF.")
+                            break
 
-                    if _is_no_group_match(res):
-                        logger.info(
-                            f"[{self.account_name}] ℹ️ Платформа '{platform_candidate}' повернула E2-14-3 (no group match). Пробуємо наступний варіант..."
+                        res = self.checkin_mgr._call_mtop(
+                            TASK_DELIVERY_QUERY_API,
+                            data={
+                                "ua": ua_val,
+                                "umidToken": TASK_UMID_TOKEN,
+                                "umidTokenType": "TOKEN",
+                                "_lang": lang,
+                                "_currency": currency,
+                                "lang": lang,
+                                "currency": currency,
+                                "locale": locale,
+                                "ttid": TASK_TTID,
+                                "platform": platform_candidate,
+                                "sceneId": cur_scene_id,
+                                "taskSceneId": cur_scene_id,
+                                "projectAppKey": cur_app_key,
+                                "taskAppKey": cur_app_key,
+                                "asac": cur_asac,
+                                "fromNew": True
+                            }
                         )
-                        continue
+                        if getattr(self.checkin_mgr, "waf_blocked", False) is True or is_captcha_required(res):
+                            self.status = "CAPTCHA_REQUIRED"
+                            self.error_message = "Alibaba WAF captcha blocked"
+                            if self.checkin_mgr:
+                                self.checkin_mgr.waf_blocked = True
+                            logger.warning(f"[{self.account_name}] 🧩 Виявлено WAF / Captcha при запиті завдань. Перериваємо опитування.")
+                            break
 
-                    # Якщо повернулася відповідь не з помилкою no group match
-                    all_no_group_match = False
-                    ret = res.get("ret")
-                    ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+                        if not res or not isinstance(res, dict):
+                            all_no_group_match = False
+                            continue
 
-                    is_success = False
-                    if isinstance(ret, list) and ret:
-                        if "SUCCESS" in ret_str.upper():
+                        if _is_scene_error(res):
+                            logger.info(
+                                f"[{self.account_name}] ℹ️ Сцена {cur_scene_id} ({scene_name}) застаріла або не існує (E2-14-1). Пробуємо наступного кандидата..."
+                            )
+                            # Сцена не існує для жодної платформи, переходимо до наступної сцени
+                            break
+
+                        if _is_no_group_match(res):
+                            logger.info(
+                                f"[{self.account_name}] ℹ️ Сцена {cur_scene_id} ({scene_name}) / '{platform_candidate}' повернула E2-14-3 (no group match). Пробуємо наступний варіант..."
+                            )
+                            continue
+
+                        all_no_group_match = False
+                        ret = res.get("ret")
+                        ret_str = ret[0] if (isinstance(ret, list) and ret) else str(ret or "")
+                        last_error_str = ret_str
+
+                        is_success = False
+                        if isinstance(ret, list) and ret:
+                            if "SUCCESS" in ret_str.upper():
+                                is_success = True
+                        elif res.get("success") is True or (isinstance(res.get("data"), dict) and res["data"].get("success") is not False):
                             is_success = True
-                    elif res.get("success") is True or (isinstance(res.get("data"), dict) and res["data"].get("success") is not False):
-                        is_success = True
-                    elif "data" in res and ret is None:
-                        is_success = True
+                        elif "data" in res and ret is None:
+                            is_success = True
 
-                    if is_success:
-                        logger.info(f"[{self.account_name}] ✅ Знайдено робочу платформу для завдань: '{platform_candidate}'")
-                        mtop_res = res
-                        working_platform = platform_candidate
-                        self.working_platform = platform_candidate
+                        if is_success:
+                            logger.info(f"[{self.account_name}] ✅ Знайдено активну сцену завдань: {cur_scene_id} ({scene_name}) на платформі '{platform_candidate}'")
+                            mtop_res = res
+                            working_platform = platform_candidate
+                            self.working_platform = platform_candidate
+                            self.working_scene_id = cur_scene_id
+                            self.working_asac = cur_asac
+                            self.working_app_key = cur_app_key
+                            break
+                        else:
+                            logger.debug(f"[{self.account_name}] Сцена {cur_scene_id} / '{platform_candidate}' повернула помилку: {ret_str}")
+
+                    if working_platform is not None:
                         break
-                    else:
-                        logger.error(f"[{self.account_name}] ❌ Помилка запиту завдань ({TASK_DELIVERY_QUERY_API}): {ret_str}")
-                        self.status = "FAILED"
-                        self.error_message = ret_str
-                        return []
 
                 if working_platform is None:
+                    if self.status == "CAPTCHA_REQUIRED":
+                        return []
                     if all_no_group_match:
                         logger.warning(
-                            f"[{self.account_name}] ⚠️ Для поточної сцени/регіону немає активної групи завдань "
-                            f"(E2-14-3: no group match). Можливо, потрібні актуальні taskSceneId та projectAppKey з додатку."
+                            f"[{self.account_name}] ⚠️ Для перевірених сцен/регіону немає активної групи завдань (E2-14-3: no group match)."
                         )
                         self.status = "SKIPPED"
                         self.error_message = "no group match (E2-14-3)"
                         return []
-                    elif self.status != "FAILED":
-                        logger.warning(f"[{self.account_name}] ⚠️ MTOP {TASK_DELIVERY_QUERY_API} не повернув відповіді.")
-                        self.status = "FAILED"
-                        self.error_message = "No response from MTOP"
-                        return []
-                    else:
-                        return []
+                    logger.warning(f"[{self.account_name}] ⚠️ MTOP не повернув активних завдань серед перевірених сцен: {last_error_str or 'No response'}")
+                    self.status = "FAILED" if last_error_str else "SKIPPED"
+                    self.error_message = last_error_str or "No response from MTOP"
+                    return []
 
                 data_field = mtop_res.get("data")
                 raw_items = []
@@ -625,13 +679,18 @@ class CoinsFarmManager:
                             or it.get("componentType")
                         )
 
+                        cur_scene_id = getattr(self, "working_scene_id", TASK_SCENE_ID)
+                        cur_asac = getattr(self, "working_asac", ASAC_TASK_CAMPAIGN)
+                        cur_app_key = getattr(self, "working_app_key", TASK_APP_KEY)
+
                         normalized.append({
                             "taskId": task_id,
                             "taskInstanceId": task_id,
-                            "taskAppKey": it.get("taskAppKey") or TASK_APP_KEY,
-                            "projectAppKey": it.get("projectAppKey") or PROJECT_APP_KEY,
-                            "taskSceneId": it.get("taskSceneId") or TASK_SCENE_ID,
-                            "sceneId": it.get("sceneId") or TASK_SCENE_ID,
+                            "taskAppKey": it.get("taskAppKey") or cur_app_key,
+                            "projectAppKey": it.get("projectAppKey") or cur_app_key,
+                            "taskSceneId": it.get("taskSceneId") or cur_scene_id,
+                            "sceneId": it.get("sceneId") or cur_scene_id,
+                            "asac": it.get("asac") or cur_asac,
                             "groupId": group_id,
                             "interestCode": interest_code,
                             "instanceStatus": instance_status,
@@ -1180,20 +1239,23 @@ class CoinsFarmManager:
 
         locale, currency, lang = _extract_user_locale_params(self.client)
         task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
+        working_scene = getattr(self, "working_scene_id", TASK_SCENE_ID)
+        working_asac = getattr(self, "working_asac", ASAC_TASK_CAMPAIGN)
+        working_app_key = getattr(self, "working_app_key", TASK_APP_KEY)
         ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
         payload = {
             "ua": ua_val,
             "umidToken": TASK_UMID_TOKEN,
             "umidTokenType": "TOKEN",
             "taskInstanceId": task_id,
-            "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
-            "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
-            "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
-            "sceneId": task.get("sceneId", TASK_SCENE_ID),
+            "taskAppKey": task.get("taskAppKey") or working_app_key,
+            "projectAppKey": task.get("projectAppKey") or working_app_key,
+            "taskSceneId": task.get("taskSceneId") or working_scene,
+            "sceneId": task.get("sceneId") or working_scene,
             "ttid": task.get("ttid", TASK_TTID),
             "platform": task_platform,
             "fromNew": True,
-            "asac": ASAC_TASK_CAMPAIGN,
+            "asac": task.get("asac") or working_asac,
             "idemId": str(int(time.time() * 1000)),
             "locale": task.get("locale", locale),
             "_lang": task.get("_lang", lang),
@@ -1273,22 +1335,25 @@ class CoinsFarmManager:
 
         locale, currency, lang = _extract_user_locale_params(self.client)
         task_platform = task.get("platform") or getattr(self, "working_platform", TASK_PLATFORM)
+        working_scene = getattr(self, "working_scene_id", TASK_SCENE_ID)
+        working_asac = getattr(self, "working_asac", ASAC_TASK_CAMPAIGN)
+        working_app_key = getattr(self, "working_app_key", TASK_APP_KEY)
         ua_val = f"defaultUA2_load_failed with timeout@@https://m.aliexpress.com/p/coin-index/index.html@@{int(time.time() * 1000)}"
         payload = {
             "ua": ua_val,
             "umidToken": TASK_UMID_TOKEN,
             "umidTokenType": "TOKEN",
             "taskInstanceId": task_id,
-            "taskAppKey": task.get("taskAppKey", TASK_APP_KEY),
-            "projectAppKey": task.get("projectAppKey", PROJECT_APP_KEY),
-            "taskSceneId": task.get("taskSceneId", TASK_SCENE_ID),
-            "sceneId": task.get("sceneId", TASK_SCENE_ID),
+            "taskAppKey": task.get("taskAppKey") or working_app_key,
+            "projectAppKey": task.get("projectAppKey") or working_app_key,
+            "taskSceneId": task.get("taskSceneId") or working_scene,
+            "sceneId": task.get("sceneId") or working_scene,
             "detailIds": "",
             "detailIdsString": detail_ids_str,
             "ttid": task.get("ttid", TASK_TTID),
             "platform": task_platform,
             "fromNew": True,
-            "asac": ASAC_TASK_CAMPAIGN,
+            "asac": task.get("asac") or working_asac,
             "idemId": str(int(time.time() * 1000)),
             "locale": task.get("locale", locale),
             "_lang": task.get("_lang", lang),
