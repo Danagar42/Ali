@@ -2,8 +2,10 @@ import os
 import sys
 import re
 import html
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 import requests
 
@@ -205,10 +207,10 @@ class AccountSummary:
     task_details: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
-        # Якщо coins_earned_this_run не переданий явно, вираховуємо з coins_earned та prior_rewards_today
+        # Повторний чекін не є новою нагородою; свіжими можуть бути лише таски.
         if self.coins_earned_this_run is None:
-            if self.prior_rewards_today > 0:
-                self.coins_earned_this_run = 0
+            if self.checkin_status == "ALREADY_DONE" or self.prior_rewards_today > 0:
+                self.coins_earned_this_run = self.tasks_coins
             else:
                 self.coins_earned_this_run = self.coins_earned
         if self.tasks_already_done == 0 and self.task_details:
@@ -281,10 +283,11 @@ class NotificationDispatcher:
     2. Відправка структурованого інформативного повідомлення у Telegram через бота.
     """
 
-    def __init__(self):
+    def __init__(self, state_dir: str = ".state"):
         self.summaries: List[AccountSummary] = []
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        self.notification_state_path = os.path.join(state_dir, "telegram_notification.json")
 
     def add_summary(self, summary: AccountSummary):
         self.summaries.append(summary)
@@ -320,8 +323,8 @@ class NotificationDispatcher:
             1 for s in self.summaries
             if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid
         )
-        total_coins_earned = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in self.summaries)
-        total_checkin_coins = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in self.summaries)
+        total_coins_earned = sum(s.coins_earned_this_run for s in self.summaries)
+        total_checkin_coins = sum(max(0, s.coins_earned_this_run - s.tasks_coins) for s in self.summaries)
         total_tasks_coins = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in self.summaries)
         total_tasks_done = sum(int(s.tasks_done) if isinstance(s.tasks_done, (int, float)) else 0 for s in self.summaries)
         has_expired = any(
@@ -352,7 +355,7 @@ class NotificationDispatcher:
             "",
             f"> **Статус обробки:** {status_text} | "
             f"**Акаунтів:** {successful_accounts}/{total_accounts} | "
-            f"**Зароблено монет сьогодні:** +{total_coins_earned} 🪙",
+            f"**Зароблено монет за запуск:** +{total_coins_earned} 🪙",
             f"> **Деталізація нагород:** 🪙 Чекін: +{total_checkin_coins} 🪙 | 🛍️ Завдання: +{total_tasks_coins} 🪙 ({total_tasks_done} вик.)",
             ""
         ]
@@ -374,14 +377,14 @@ class NotificationDispatcher:
         lines.extend([
             "### 📊 Результати по акаунтах",
             "",
-            "| Акаунт | Чекін | Стрік | Сьогодні | Всього монет | Таски | Сесія |",
+            "| Акаунт | Чекін | Стрік | За запуск | Всього монет | Таски | Сесія |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
         ])
 
         for s in self.summaries:
             streak_val = int(s.streak_days) if isinstance(s.streak_days, (int, float)) else 0
             streak_str = f"🔥 {streak_val} дн." if streak_val > 0 else "-"
-            earned_val = int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0
+            earned_val = s.coins_earned_this_run
             earned_str = f"+{earned_val} 🪙" if earned_val > 0 else "0"
             if s.total_coins is not None:
                 if s.initial_coins is not None:
@@ -452,7 +455,8 @@ class NotificationDispatcher:
 
             strk_v = int(s.streak_days) if isinstance(s.streak_days, (int, float)) else 0
             strk = f"🔥 {strk_v} дн." if strk_v > 0 else "-"
-            chk_c = f"+{int(s.checkin_coins)} 🪙" if isinstance(s.checkin_coins, (int, float)) and s.checkin_coins > 0 else "0"
+            checkin_this_run = max(0, s.coins_earned_this_run - s.tasks_coins)
+            chk_c = f"+{checkin_this_run} 🪙" if checkin_this_run > 0 else "0"
             lines.append(
                 f"| **{safe_name}** | {pc_st} | {pc_c} | {mob_st} | {mob_c} | {strk} | {chk_c} |"
             )
@@ -548,8 +552,8 @@ class NotificationDispatcher:
             1 for s in self.summaries
             if s.checkin_status in ("SUCCESS", "ALREADY_DONE") and s.session_valid
         )
-        total_coins = sum(int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0 for s in self.summaries)
-        total_checkin_coins = sum(int(s.checkin_coins) if isinstance(s.checkin_coins, (int, float)) else 0 for s in self.summaries)
+        total_coins = sum(s.coins_earned_this_run for s in self.summaries)
+        total_checkin_coins = sum(max(0, s.coins_earned_this_run - s.tasks_coins) for s in self.summaries)
         total_tasks_coins = sum(int(s.tasks_coins) if isinstance(s.tasks_coins, (int, float)) else 0 for s in self.summaries)
         has_expired = any(
             not s.session_valid
@@ -572,11 +576,7 @@ class NotificationDispatcher:
             or s.mobile_status == "SUCCESS"
             or (isinstance(s.tasks_done, (int, float)) and s.tasks_done > 0)
             or (isinstance(s.tasks_coins, (int, float)) and s.tasks_coins > 0)
-            or (
-                isinstance(s.total_coins, (int, float))
-                and isinstance(s.initial_coins, (int, float))
-                and s.total_coins > s.initial_coins
-            )
+            or s.coins_earned_this_run > 0
             for s in self.summaries
         )
         has_problem = (
@@ -593,15 +593,46 @@ class NotificationDispatcher:
         is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
         event_name = os.getenv("GITHUB_EVENT_NAME", "").strip().lower()
         skip_sleep = os.getenv("SKIP_RANDOM_SLEEP", "").strip().lower() in ("1", "true", "yes")
-        is_manual = (event_name == "workflow_dispatch") or skip_sleep or (not is_ci)
+        is_manual = event_name == "workflow_dispatch" or (
+            event_name != "schedule" and (skip_sleep or not is_ci)
+        )
         notify_always = os.getenv("TELEGRAM_NOTIFY_ALWAYS", "").strip().lower() in ("1", "true", "yes")
 
-        # Якщо це фоновий плановий запуск і всі акаунти вже були успішно оброблені раніше (ALREADY_DONE)
-        # без нових дій та помилок — пропускаємо сповіщення в Telegram, щоб не спамити повторно протягом дня.
-        if is_ci and not is_manual and not notify_always:
+        automatic = (is_ci or event_name == "schedule") and not is_manual and not notify_always
+        notification_state = {
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "chat_id": self.telegram_chat_id,
+            "problems": [
+                {
+                    "name": s.name,
+                    "statuses": [
+                        status if status in ("FAILED", "SESSION_EXPIRED", "CAPTCHA_REQUIRED") else None
+                        for status in (s.checkin_status, s.pc_status, s.mobile_status, s.tasks_status)
+                    ],
+                    "session_valid": s.session_valid,
+                    "tasks_failed": s.tasks_failed,
+                    "failed_tasks": sorted(
+                        str(t.get("task_id") or t.get("title") or "")
+                        for t in s.task_details
+                        if isinstance(t, dict) and t.get("status") == "FAILED"
+                    ),
+                    "error_message": s.error_message,
+                }
+                for s in sorted(self.summaries, key=lambda s: s.name) if s.has_problem
+            ],
+        }
+        if automatic:
             if not fresh_action and not has_problem:
                 logger.info("ℹ️ Усі акаунти вже були успішно оброблені сьогодні (ALREADY_DONE), повторне сповіщення в Telegram пропущено.")
                 return False
+            if not fresh_action:
+                try:
+                    with open(self.notification_state_path, encoding="utf-8") as f:
+                        if json.load(f) == notification_state:
+                            logger.info("ℹ️ Ці проблеми вже повідомлено сьогодні; повторне сповіщення пропущено.")
+                            return False
+                except (OSError, ValueError):
+                    pass
 
         if has_expired:
             status_header = "🚨 <b>AliExpress Farmer: Потрібна увага!</b>"
@@ -624,9 +655,9 @@ class NotificationDispatcher:
             f"👤 Акаунтів: <b>{successful_accounts}/{total_accounts}</b>",
         ]
         if total_coins > 0:
-            coins_line = f"🪙 Зароблено сьогодні: <b>+{total_coins} 🪙</b> (<b>{fiat_today}</b>)"
+            coins_line = f"🪙 Зароблено за запуск: <b>+{total_coins} 🪙</b> (<b>{fiat_today}</b>)"
         else:
-            coins_line = f"🪙 Зароблено сьогодні: <b>0 🪙</b> (<b>{fiat_today}</b>)"
+            coins_line = f"🪙 Зароблено за запуск: <b>0 🪙</b> (<b>{fiat_today}</b>)"
 
         if total_checkin_coins > 0 or total_tasks_coins > 0:
             coins_line += f" <i>(чекін: +{total_checkin_coins}, таски: +{total_tasks_coins})</i>"
@@ -659,7 +690,7 @@ class NotificationDispatcher:
             streak_v = int(s.streak_days) if isinstance(s.streak_days, (int, float)) else 0
             if streak_v > 0:
                 detail += f", стрік {streak_v} дн."
-            earned_v = int(s.coins_earned) if isinstance(s.coins_earned, (int, float)) else 0
+            earned_v = s.coins_earned_this_run
             if earned_v > 0:
                 detail += f", +{earned_v} монет"
             tasks_v = int(s.tasks_done) if isinstance(s.tasks_done, (int, float)) else 0
@@ -685,11 +716,11 @@ class NotificationDispatcher:
                 if s.initial_coins is not None:
                     actual_diff = int(s.total_coins) - int(s.initial_coins)
                     diff_str = f"+{actual_diff}" if actual_diff > 0 else str(actual_diff)
-                    day_str = f"+{earned_v}" if earned_v > 0 else str(earned_v)
+                    reward_str = f"+{earned_v}" if earned_v > 0 else str(earned_v)
                     if actual_diff != earned_v:
                         sub_lines.append(
                             f"   💰 Баланс: <code>{_format_coins(s.initial_coins)}</code> ➔ <b>{_format_coins(s.total_coins)} 🪙</b> "
-                            f"(за запуск: <b>{diff_str}</b>, за день: <b>{day_str}</b>){verified_note} • <b>{fiat_total}</b>"
+                            f"(зміна балансу: <b>{diff_str}</b>, нагороди за запуск: <b>{reward_str}</b>){verified_note} • <b>{fiat_total}</b>"
                         )
                     elif earned_v > 0 or actual_diff != 0:
                         sub_lines.append(
@@ -702,7 +733,7 @@ class NotificationDispatcher:
                     sub_lines.append(f"   💰 Баланс: <b>{_format_coins(s.total_coins)} 🪙</b>{verified_note} • <b>{fiat_total}</b>")
             elif earned_v > 0:
                 fiat_earned = _format_fiat_equiv(earned_v, rate=rate, show_sign=True)
-                sub_lines.append(f"   💰 Зароблено сьогодні: <b>+{earned_v} 🪙</b> (<b>{fiat_earned}</b>) (загальний баланс не отримано)")
+                sub_lines.append(f"   💰 Зароблено за запуск: <b>+{earned_v} 🪙</b> (<b>{fiat_earned}</b>) (загальний баланс не отримано)")
 
             # 2. Двоканальний чекін (PC + Mobile)
             if s.pc_status or s.mobile_status:
@@ -858,6 +889,13 @@ class NotificationDispatcher:
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
                 logger.info("📬 Сповіщення у Telegram успішно надіслано!")
+                if automatic:
+                    try:
+                        os.makedirs(os.path.dirname(self.notification_state_path), exist_ok=True)
+                        with open(self.notification_state_path, "w", encoding="utf-8") as f:
+                            json.dump(notification_state, f, ensure_ascii=False)
+                    except OSError as e:
+                        logger.warning(f"Не вдалося зберегти стан Telegram-сповіщення: {e}")
                 return True
             else:
                 logger.warning(f"Telegram API повернув помилку: {resp.status_code} - {resp.text}")

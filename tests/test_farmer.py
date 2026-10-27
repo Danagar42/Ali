@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import hashlib
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 import requests
@@ -5228,17 +5229,17 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             # Перевіряємо відокремлення
             self.assertIn("🛍️ Таски: <b>1</b> вик. (+5 🪙), 2 вже вик., 1 пропущ.", call_text)
 
-    def test_balance_change_honest_display_when_diff_differs_from_daily_earned(self):
-        """Перевіряє відображення '(за запуск: +X, за день: +Y)' при повторному запуску за день."""
+    def test_balance_change_honest_display_when_diff_differs_from_run_rewards(self):
+        """Зміна балансу та підтверджені нагороди за запуск можуть відрізнятися."""
         from src.notifications import NotificationDispatcher, AccountSummary
         dispatcher = NotificationDispatcher()
         dispatcher.telegram_bot_token = "fake_token"
         dispatcher.telegram_chat_id = "fake_chat"
 
-        # За запуск додалося 25 (539 -> 564), а за день загалом 55 (30 чекін раніше + 25 таски)
+        # Баланс зріс на 25 (539 -> 564), хоча підтверджені нагороди становлять 55.
         dispatcher.add_summary(AccountSummary(
             name="Repeat_Run_Account",
-            checkin_status="ALREADY_DONE",
+            checkin_status="SUCCESS",
             coins_earned=55,
             initial_coins=539,
             total_coins=564,
@@ -5251,7 +5252,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             dispatcher.send_telegram_notification()
             call_text = mock_post.call_args[1]["json"]["text"]
 
-            expected_snippet = "💰 Баланс: <code>539</code> ➔ <b>564 🪙</b> (за запуск: <b>+25</b>, за день: <b>+55</b>)"
+            expected_snippet = "💰 Баланс: <code>539</code> ➔ <b>564 🪙</b> (зміна балансу: <b>+25</b>, нагороди за запуск: <b>+55</b>)"
             self.assertIn(expected_snippet, call_text)
 
     def test_safe_truncate_html_cleans_empty_paired_tags(self):
@@ -5299,7 +5300,7 @@ class TestTelegramNotificationRefinements(unittest.TestCase):
             call_text = mock_post.call_args[1]["json"]["text"]
 
             # 1. Основна інформація присутня
-            self.assertIn("🪙 Зароблено сьогодні: <b>+55 🪙</b> (<b>+$0.55 ≈ 22.0 грн</b>)", call_text)
+            self.assertIn("🪙 Зароблено за запуск: <b>+55 🪙</b> (<b>+$0.55 ≈ 22.0 грн</b>)", call_text)
             self.assertIn("💰 Баланс: <code>1,500</code> ➔ <b>1,555 🪙</b> (<b>+55</b>) • <b>$15.55 ≈ 622.0 грн</b>", call_text)
             self.assertIn("🛍️ Таски: <b>1</b> вик. (+15 🪙), 1 пропущ.", call_text)
 
@@ -5741,7 +5742,7 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
     def test_telegram_notification_sent_on_schedule_when_fresh_success(self):
         """Перевіряє, що плановий запуск за розкладом надсилає сповіщення при новому успішному чекіні (SUCCESS)."""
         from src.notifications import NotificationDispatcher, AccountSummary
-        dispatcher = NotificationDispatcher()
+        dispatcher = NotificationDispatcher(state_dir=self.enterContext(tempfile.TemporaryDirectory()))
         dispatcher.telegram_bot_token = "fake_token"
         dispatcher.telegram_chat_id = "fake_chat"
         dispatcher.add_summary(AccountSummary(
@@ -5772,7 +5773,7 @@ class TestRefactoringAndBugfixesRegression(unittest.TestCase):
     def test_telegram_notification_sent_on_schedule_when_has_problem(self):
         """Перевіряє, що плановий запуск за розкладом надсилає сповіщення, якщо сесія прострочена або потрібна капча."""
         from src.notifications import NotificationDispatcher, AccountSummary
-        dispatcher = NotificationDispatcher()
+        dispatcher = NotificationDispatcher(state_dir=self.enterContext(tempfile.TemporaryDirectory()))
         dispatcher.telegram_bot_token = "fake_token"
         dispatcher.telegram_chat_id = "fake_chat"
         dispatcher.add_summary(AccountSummary(
