@@ -582,6 +582,7 @@ class NotificationDispatcher:
         has_problem = (
             has_expired
             or has_captcha
+            or (total_accounts == 0)
             or (successful_accounts < total_accounts)
             or any(s.aggregate_status in ("PARTIAL", "FAILED", "ACTION_REQUIRED") for s in self.summaries)
             or any(bool(s.error_message) for s in self.summaries)
@@ -593,15 +594,16 @@ class NotificationDispatcher:
         is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
         event_name = os.getenv("GITHUB_EVENT_NAME", "").strip().lower()
         skip_sleep = os.getenv("SKIP_RANDOM_SLEEP", "").strip().lower() in ("1", "true", "yes")
-        is_manual = event_name == "workflow_dispatch" or (
+        is_manual = event_name in ("workflow_dispatch", "push", "pull_request") or (
             event_name != "schedule" and (skip_sleep or not is_ci)
         )
         notify_always = os.getenv("TELEGRAM_NOTIFY_ALWAYS", "").strip().lower() in ("1", "true", "yes")
 
-        automatic = (is_ci or event_name == "schedule") and not is_manual and not notify_always
+        automatic = (event_name == "schedule") and not is_manual and not notify_always
         notification_state = {
             "date": datetime.now(timezone.utc).date().isoformat(),
             "chat_id": self.telegram_chat_id,
+            "total_accounts": total_accounts,
             "problems": [
                 {
                     "name": s.name,
@@ -622,7 +624,7 @@ class NotificationDispatcher:
             ],
         }
         if automatic:
-            if not fresh_action and not has_problem:
+            if total_accounts > 0 and not fresh_action and not has_problem:
                 logger.info("ℹ️ Усі акаунти вже були успішно оброблені сьогодні (ALREADY_DONE), повторне сповіщення в Telegram пропущено.")
                 return False
             if not fresh_action:

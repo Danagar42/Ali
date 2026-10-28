@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Union
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from src.auth import parse_cookie_string
+from src.auth import parse_cookie_string, clean_cookie_token
 from src.config import (
     BROWSER_PROFILES,
     get_random_browser_profile,
@@ -61,7 +61,10 @@ class AliClient:
 
         cookie_dict = parse_cookie_string(cookies) if isinstance(cookies, str) else (cookies or {})
         for k, v in cookie_dict.items():
-            self.session.cookies.set(k, v, domain=".aliexpress.com", path="/", secure=True)
+            clean_k = clean_cookie_token(k)
+            clean_v = clean_cookie_token(v)
+            if clean_k:
+                self.session.cookies.set(clean_k, clean_v, domain=".aliexpress.com", path="/", secure=True)
 
         # Проксі: переданий явно, або зі змінної ALI_PROXY_{account_name}, або ALI_PROXY_{suffix}, або глобальної ALI_PROXY
         resolved_proxy = (
@@ -154,7 +157,7 @@ class AliClient:
         try:
             resp = self.session.get(url, params=params, timeout=20, **kwargs)
             return resp
-        except requests.RequestException as e:
+        except (requests.RequestException, UnicodeEncodeError, ValueError) as e:
             logger.error(f"[{self.account_name}] Помилка GET запиту до {url}: {e}")
             return None
 
@@ -163,6 +166,6 @@ class AliClient:
         try:
             resp = self.session.post(url, data=data, json=json, timeout=20, **kwargs)
             return resp
-        except requests.RequestException as e:
+        except (requests.RequestException, UnicodeEncodeError, ValueError) as e:
             logger.error(f"[{self.account_name}] Помилка POST запиту до {url}: {e}")
             return None

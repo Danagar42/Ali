@@ -74,6 +74,26 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(parse_cookie_string(""), {})
         self.assertEqual(parse_cookie_string("   "), {})
 
+    def test_parse_cookie_string_strips_bom_and_zero_width_chars(self):
+        cookie_str = "\ufeff_m_h5_tk=token123_456; \ufeffaep_usuc_f=region=KR\u200b; foo\u200c=bar"
+        parsed = parse_cookie_string(cookie_str)
+        self.assertIn("_m_h5_tk", parsed)
+        self.assertNotIn("\ufeff_m_h5_tk", parsed)
+        self.assertEqual(parsed["_m_h5_tk"], "token123_456")
+        self.assertEqual(parsed["aep_usuc_f"], "region=KR")
+        self.assertEqual(parsed["foo"], "bar")
+
+    def test_ali_client_strips_bom_from_cookie_dict_and_string(self):
+        client = AliClient(cookies="\ufeff_m_h5_tk=token123_456; \ufeffaep_usuc_f=region=KR")
+        names = [c.name for c in client.session.cookies]
+        self.assertIn("_m_h5_tk", names)
+        self.assertNotIn("\ufeff_m_h5_tk", names)
+        req = requests.Request("GET", "https://aliexpress.com", cookies=client.session.cookies)
+        prep = client.session.prepare_request(req)
+        cookie_header = prep.headers.get("Cookie", "")
+        encoded = cookie_header.encode("latin-1")
+        self.assertIn(b"_m_h5_tk=token123_456", encoded)
+
     def test_natural_sort_key(self):
         keys = ["ALI_COOKIES_10", "ALI_COOKIES_1", "ALI_COOKIES_2", "ALI_COOKIES_20"]
         sorted_keys = sorted(keys, key=_natural_sort_key)
@@ -4255,6 +4275,20 @@ class TestDetailedFarmerReporting(unittest.TestCase):
             dispatcher.send_telegram_notification()
             sent_text = mock_post.call_args[1]["json"]["text"]
             self.assertIn("Немає акаунтів", sent_text)
+
+    def test_summary_reports_no_accounts_status_when_empty_under_ci(self):
+        """Гарантує, що за відсутності акаунтів сповіщення надсилається і не заглушується як ALREADY_DONE навіть під час CI (push/pull_request)."""
+        from src.notifications import NotificationDispatcher
+        dispatcher = NotificationDispatcher()
+        dispatcher.telegram_bot_token = "token"
+        dispatcher.telegram_chat_id = "chat"
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "CI": "true", "GITHUB_EVENT_NAME": "push"}):
+            with patch("requests.post") as mock_post:
+                mock_post.return_value.status_code = 200
+                res = dispatcher.send_telegram_notification()
+                self.assertTrue(res)
+                sent_text = mock_post.call_args[1]["json"]["text"]
+                self.assertIn("Немає акаунтів", sent_text)
 
     def test_materials_parsing_extracts_main_title_behavior_config_and_real_url(self):
         """Перевіряє коректний парсинг mainTitle з видаленням \\n, behaviorConfig та реального URL без fallback."""

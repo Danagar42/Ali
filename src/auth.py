@@ -56,6 +56,20 @@ def validate_aliexpress_cookies(account_name: str, cookies: Dict[str, str]) -> b
     return True
 
 
+def clean_cookie_token(token: Any) -> str:
+    """
+    Очищує ключ або значення cookie від UTF-8 BOM (\ufeff, \ufffe), невидимих zero-width символів
+    та не-latin1 байтів, які ламають HTTP-заголовки Python requests/urllib3 (UnicodeEncodeError).
+    """
+    if token is None:
+        return ""
+    if not isinstance(token, str):
+        token = str(token)
+    cleaned = re.sub(r"^[\ufeff\ufffe\u200b-\u200f\u2060\u00a0\s]+|[\ufeff\ufffe\u200b-\u200f\u2060\u00a0\s]+$", "", token)
+    cleaned = re.sub(r"[\ufeff\ufffe\u200b-\u200f\u2060]", "", cleaned)
+    return cleaned.encode("latin-1", "ignore").decode("latin-1").strip()
+
+
 def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
     """
     Перетворює рядок cookies (скопійований з браузера DevTools Header або document.cookie)
@@ -66,8 +80,10 @@ def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
         return cookies
 
     cleaned = cookie_str.strip()
+    cleaned = re.sub(r"^[\ufeff\ufffe\u200b-\u200f\u2060\u00a0\s]+", "", cleaned)
     if cleaned.lower().startswith("cookie:"):
         cleaned = cleaned[7:].strip()
+        cleaned = re.sub(r"^[\ufeff\ufffe\u200b-\u200f\u2060\u00a0\s]+", "", cleaned)
 
     items = cleaned.split(";")
     for item in items:
@@ -75,8 +91,8 @@ def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
         if not item or "=" not in item:
             continue
         key, val = item.split("=", 1)
-        k = key.strip()
-        v = val.strip()
+        k = clean_cookie_token(key)
+        v = clean_cookie_token(val)
         if k:
             cookies[k] = v
 
@@ -159,12 +175,12 @@ def load_accounts() -> List[AccountConfig]:
                             if isinstance(raw_cookies, str):
                                 c_dict = parse_cookie_string(raw_cookies)
                             elif isinstance(raw_cookies, dict):
-                                c_dict = {str(k): str(v) for k, v in raw_cookies.items()}
+                                c_dict = {clean_cookie_token(k): clean_cookie_token(v) for k, v in raw_cookies.items() if clean_cookie_token(k)}
                             else:
                                 logger.error(f"❌ [{name}] Поле 'cookies' має бути рядком або словником, отримано {type(raw_cookies).__name__}.")
                                 continue
                         else:
-                            c_dict = {str(k): str(v) for k, v in c_data.items()}
+                            c_dict = {clean_cookie_token(k): clean_cookie_token(v) for k, v in c_data.items() if clean_cookie_token(k)}
                     elif isinstance(c_data, str):
                         c_dict = parse_cookie_string(c_data)
                     else:
@@ -201,12 +217,12 @@ def load_accounts() -> List[AccountConfig]:
                             if isinstance(raw_cookies, str):
                                 c_dict = parse_cookie_string(raw_cookies)
                             elif isinstance(raw_cookies, dict):
-                                c_dict = {str(k): str(v) for k, v in raw_cookies.items()}
+                                c_dict = {clean_cookie_token(k): clean_cookie_token(v) for k, v in raw_cookies.items() if clean_cookie_token(k)}
                             else:
                                 logger.error(f"❌ [{name}] Поле 'cookies' має бути рядком або словником, отримано {type(raw_cookies).__name__}.")
                                 continue
                         else:
-                            c_dict = {str(k): str(v) for k, v in c_data.items()}
+                            c_dict = {clean_cookie_token(k): clean_cookie_token(v) for k, v in c_data.items() if clean_cookie_token(k)}
                     elif isinstance(c_data, str):
                         c_dict = parse_cookie_string(c_data)
                     else:
